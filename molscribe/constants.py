@@ -30,7 +30,7 @@ SUBSTITUTIONS: List[Substitution] = [
     Substitution(['Ac'], 'C(=O)[CH3]', "[C](=O)C", 0.1),
 
     Substitution(['OBz'], '[OH0;D2]C(=O)[cH0]1[cH][cH][cH][cH][cH]1', "[O]C(=O)c1ccccc1", 0.7),  # Benzoyl
-    Substitution(['Bz'], 'C(=O)[cH0]1[cH][cH][cH][cH][cH]1', "[C](=O)c1ccccc1", 0.2),  # Benzoyl
+    Substitution(['Bz', 'COPh', 'PhOC'], 'C(=O)[cH0]1[cH][cH][cH][cH][cH]1', "[C](=O)c1ccccc1", 0.2),  # Benzoyl
 
     Substitution(['OBn'], '[OH0;D2][CH2;D2][cH0]1[cH][cH][cH][cH][cH]1', "[O]Cc1ccccc1", 0.7),  # Benzyl
     Substitution(['Bn'], '[CH2;D2][cH0]1[cH][cH][cH][cH][cH]1', "[CH2]c1ccccc1", 0.2),  # Benzyl
@@ -67,8 +67,10 @@ SUBSTITUTIONS: List[Substitution] = [
     Substitution(['Me'], '[CH3;D1]', "[CH3]", 0.1),
     Substitution(['OEt', 'EtO'], '[OH0;D2][CH2;D2][CH3]', "[O]CC", 0.5),
     Substitution(['Et', 'C2H5'], '[CH2;D2][CH3]', "[CH2]C", 0.3),
-    Substitution(['Pr', 'nPr', 'n-Pr'], '[CH2;D2][CH2;D2][CH3]', "[CH2]CC", 0.3),
-    Substitution(['Bu', 'nBu', 'n-Bu'], '[CH2;D2][CH2;D2][CH2;D2][CH3]', "[CH2]CCC", 0.3),
+    Substitution(['Pr', 'nPr', 'n-Pr', 'C3H7'], '[CH2;D2][CH2;D2][CH3]', "[CH2]CC", 0.3),
+    Substitution(['Bu', 'nBu', 'n-Bu', 'C4H9'], '[CH2;D2][CH2;D2][CH2;D2][CH3]', "[CH2]CCC", 0.3),
+    Substitution(['C5H11', 'nPent', 'n-Pent'], '[CH2;D2][CH2;D2][CH2;D2][CH2;D2][CH3]', "[CH2]CCCC", 0.3),
+    Substitution(['C6H13', 'nHex', 'n-Hex'], '[CH2;D2][CH2;D2][CH2;D2][CH2;D2][CH2;D2][CH3]', "[CH2]CCCCC", 0.3),
 
     # Branched
     Substitution(['iPr', 'i-Pr'], '[CH1;D3]([CH3])[CH3]', "[CH1](C)C", 0.2),
