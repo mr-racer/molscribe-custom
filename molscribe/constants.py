@@ -335,9 +335,16 @@ def _longest_first(tokens):
     return '|'.join(re.escape(t) for t in sorted(tokens, key=len, reverse=True))
 
 
+# Elements that do not occur in drawn structures; a label reading like one of them (e.g. "ZrNp" for "2-Np") is a
+# misread and must not be parsed into a formula.
+IMPLAUSIBLE_ELEMENTS = {
+    "He", "Ne", "Kr", "Xe", "Rn", "Po", "At", "Fr", "Tc", "Pm", "Th", "Pa", "U", "Np", "Pu", "Am", "Cm", "Bk", "Cf",
+    "Es", "Fm", "Md", "No", "Lr", "Rf", "Db", "Sg", "Bh", "Hs", "Mt", "Ds", "Rg", "Cn", "Nh", "Fl", "Mc", "Lv", "Og",
+}
+
 # tokens of condensed formula. Alternatives are tried in order, so longer tokens must come first (otherwise e.g.
 # "SO2NH2" is split as S + O2N + H2). Real element symbols are used instead of [A-Z][a-z]+ so that "OiPr" is not
 # tokenized as the fake element "Oi". Callers should reject formulas whose tokens do not cover the whole string.
 FORMULA_REGEX = re.compile(
     '(' + _longest_first(ABBREVIATIONS) + '|' + _longest_first([r for r in RGROUP_SYMBOLS if len(r) > 1]) +
-    r'|R[0-9]*|' + _longest_first(ELEMENTS) + r'|[A-Z]|[0-9]+|\(|\))')
+    r'|R[0-9]*|' + _longest_first([e for e in ELEMENTS if e not in IMPLAUSIBLE_ELEMENTS]) + r'|[A-Z]|[0-9]+|\(|\))')

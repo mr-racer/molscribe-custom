@@ -378,6 +378,8 @@ def get_smiles_from_symbol(symbol, mol, atom, bonds):
     Convert symbol (abbrev. or condensed formula) to smiles
     If condensed formula, determine parsing direction and num. bonds on each side using coordinates
     """
+    # the decoder occasionally emits unbalanced brackets, e.g. "[[Co]"
+    symbol = symbol.strip('[]')
     smiles = _lookup_abbreviation(symbol)
     if smiles is not None:
         return smiles
