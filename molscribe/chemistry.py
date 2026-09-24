@@ -557,10 +557,13 @@ def _coordination_bonds_to_dative(mol):
     mol = Chem.RWMol(mol)
     mol.UpdatePropertyCache(strict=False)
     periodic_table = Chem.GetPeriodicTable()
-    for bond in list(mol.GetBonds()):
-        if bond.GetBondType() != Chem.BondType.SINGLE:
+    # iterate over atom pairs: Bond objects are invalidated by RemoveBond/AddBond below
+    pairs = [(bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()) for bond in mol.GetBonds()]
+    for i, j in pairs:
+        bond = mol.GetBondBetweenAtoms(i, j)
+        if bond is None or bond.GetBondType() != Chem.BondType.SINGLE:
             continue
-        a, b = bond.GetBeginAtom(), bond.GetEndAtom()
+        a, b = mol.GetAtomWithIdx(i), mol.GetAtomWithIdx(j)
         if (a.GetSymbol() in METALS) == (b.GetSymbol() in METALS):
             continue
         metal, donor = (a, b) if a.GetSymbol() in METALS else (b, a)
