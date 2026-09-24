@@ -6,11 +6,7 @@ subsequent transformer based architectures
 import torch
 import torch.nn as nn
 
-from onmt.decoders.decoder import DecoderBase
-from onmt.modules import MultiHeadedAttention, AverageAttention
-from onmt.modules.position_ffn import PositionwiseFeedForward
-from onmt.modules.position_ffn import ActivationFunction
-from onmt.utils.misc import sequence_mask
+from .onmt_modules import DecoderBase, MultiHeadedAttention, PositionwiseFeedForward, ActivationFunction
 
 
 class TransformerDecoderLayerBase(nn.Module):
@@ -64,10 +60,9 @@ class TransformerDecoderLayerBase(nn.Module):
                 dropout=attention_dropout,
                 max_relative_positions=max_relative_positions,
             )
-        elif self_attn_type == "average":
-            self.self_attn = AverageAttention(
-                d_model, dropout=attention_dropout, aan_useffn=aan_useffn
-            )
+        else:
+            # onmt's "average" attention is not used by any MolScribe checkpoint and is not vendored
+            raise ValueError(f"self attention type {self_attn_type} not supported")
 
         self.feed_forward = PositionwiseFeedForward(d_model, d_ff, dropout,
                                                     pos_ffn_activation_fn
@@ -148,10 +143,6 @@ class TransformerDecoderLayerBase(nn.Module):
                 mask=dec_mask,
                 layer_cache=layer_cache,
                 attn_type="self",
-            )
-        elif isinstance(self.self_attn, AverageAttention):
-            return self.self_attn(
-                inputs_norm, mask=dec_mask, layer_cache=layer_cache, step=step
             )
         else:
             raise ValueError(

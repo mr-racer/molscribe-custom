@@ -9,6 +9,7 @@ import timm
 from .utils import FORMAT_INFO, to_device
 from .tokenizer import SOS_ID, EOS_ID, PAD_ID, MASK_ID
 from .inference import GreedySearch, BeamSearch
+from .inference.static_greedy import StaticGreedyDecoder
 from .transformer import TransformerDecoder, Embeddings
 
 
@@ -136,6 +137,17 @@ class TransformerDecoderAR(TransformerDecoderBase):
             position_encoding=True,
             dropout=args.hidden_dropout)
         self._output_mask_table = None
+        # inference options, set by the MolScribe interface
+        self.fast_decoding = False
+        self.use_cuda_graph = False
+        self._static_decoders = {}
+
+    def _ensure_output_mask_table(self, device):
+        # the output mask only depends on the previous token: look it up on the device instead of building Python
+        # lists (and forcing a GPU->CPU sync) at every step
+        if self._output_mask_table is None or self._output_mask_table.device != device:
+            table = [self.tokenizer.get_output_mask(id) for id in range(self.vocab_size)]
+            self._output_mask_table = torch.tensor(table, dtype=torch.bool, device=device)
 
     def dec_embedding(self, tgt, step=None):
         pad_idx = self.embeddings.word_padding_idx
@@ -165,6 +177,14 @@ class TransformerDecoderAR(TransformerDecoderBase):
         memory_bank = self.enc_transform(encoder_out)
         orig_labels = labels
 
+        if self.fast_decoding and beam_size == 1 and labels is None and StaticGreedyDecoder.supported(self):
+            if self.tokenizer.output_constraint:
+                self._ensure_output_mask_table(memory_bank.device)
+            key = (max_length, self.use_cuda_graph)
+            if key not in self._static_decoders:
+                self._static_decoders[key] = StaticGreedyDecoder(self, max_length, use_cuda_graph=self.use_cuda_graph)
+            return self._static_decoders[key](memory_bank)
+
         if beam_size == 1:
             decode_strategy = GreedySearch(
                 sampling_temp=0.0, keep_topk=1, batch_size=batch_size, min_length=min_length, max_length=max_length,
@@ -187,11 +207,7 @@ class TransformerDecoderAR(TransformerDecoderBase):
         _, memory_bank = decode_strategy.initialize(memory_bank=memory_bank)
 
         if self.tokenizer.output_constraint:
-            # the mask only depends on the previous token: look it up on the device instead of building Python lists
-            # (and forcing a GPU->CPU sync) at every step
-            if self._output_mask_table is None or self._output_mask_table.device != memory_bank.device:
-                table = [self.tokenizer.get_output_mask(id) for id in range(self.vocab_size)]
-                self._output_mask_table = torch.tensor(table, dtype=torch.bool, device=memory_bank.device)
+            self._ensure_output_mask_table(memory_bank.device)
 
         # (3) Begin decoding step by step:
         for step in range(decode_strategy.max_length):
@@ -297,7 +313,7 @@ class GraphPredictor(nn.Module):
 
 
 def get_edge_prediction(edge_prob):
-    if not edge_prob:
+    if edge_prob is None:
         return [], []
     n = len(edge_prob)
     if n == 0:
@@ -391,12 +407,10 @@ class Decoder(nn.Module):
                 else:
                     raise NotImplemented
                 dec_out = results[atom_format][3]  # batch x n_best x len x dim
+                probs = self._edge_probs([dec_out[i][0] for i in range(len(dec_out))],
+                                         [predictions[i][atom_format]['indices'] for i in range(len(dec_out))])
                 for i in range(len(dec_out)):
-                    hidden = dec_out[i][0].unsqueeze(0)  # 1 * len * dim
-                    indices = torch.LongTensor(predictions[i][atom_format]['indices']).unsqueeze(0)  # 1 * k
-                    pred = self.decoder['edges'](hidden, indices)  # k * k
-                    prob = F.softmax(pred['edges'].squeeze(0).permute(1, 2, 0), dim=2).tolist()  # k * k * 7
-                    edge_pred, edge_score = get_edge_prediction(prob)
+                    edge_pred, edge_score = get_edge_prediction(probs[i])
                     predictions[i]['edges'] = edge_pred
                     if self.compute_confidence:
                         predictions[i]['edge_scores'] = edge_score
@@ -406,3 +420,18 @@ class Decoder(nn.Module):
                         predictions[i][atom_format].pop('average_token_score')
                         predictions[i].pop('edge_score_product')
         return predictions
+
+    def _edge_probs(self, hiddens, indices_list):
+        """Edge class probabilities (k x k x 7 per molecule) with a single GraphPredictor call for the whole batch."""
+        max_atoms = max((len(indices) for indices in indices_list), default=0)
+        if max_atoms == 0:
+            return [[] for _ in hiddens]
+        max_len = max(hidden.size(0) for hidden in hiddens)
+        hidden = hiddens[0].new_zeros((len(hiddens), max_len, hiddens[0].size(-1)))
+        index = torch.zeros((len(hiddens), max_atoms), dtype=torch.long)  # padded with 0, sliced away below
+        for i, (h, indices) in enumerate(zip(hiddens, indices_list)):
+            hidden[i, :h.size(0)] = h
+            index[i, :len(indices)] = torch.LongTensor(indices)
+        pred = self.decoder['edges'](hidden, index)['edges']  # b x 7 x k x k
+        prob = F.softmax(pred.permute(0, 2, 3, 1).float(), dim=3).cpu().numpy()  # b x k x k x 7
+        return [prob[i, :len(indices), :len(indices)] for i, indices in enumerate(indices_list)]

@@ -1,16 +1,17 @@
 import argparse
+import contextlib
 from typing import List
 
 import cv2
 import torch
 import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.backends.backend_agg import FigureCanvasAgg
 
-from .dataset import get_transforms
-from .model import Encoder, Decoder
+from .transforms import InferenceTransform
+from .model import Encoder, Decoder, TransformerDecoderAR
 from .chemistry import convert_graph_to_smiles
 from .tokenizer import get_tokenizer
+
+PRECISIONS = {'fp32': None, 'fp16': torch.float16, 'bf16': torch.bfloat16}
 
 
 BOND_TYPES = ["", "single", "double", "triple", "aromatic", "solid wedge", "dashed wedge"]
@@ -25,24 +26,41 @@ def safe_load(module, module_states):
 
 class MolScribe:
 
-    def __init__(self, model_path, device=None, num_workers=1):
+    def __init__(self, model_path, device=None, num_workers=1, precision='fp32', fast_decoding=True, cuda_graph=True):
         """
         MolScribe Interface
         :param model_path: path of the model checkpoint.
         :param device: torch device, defaults to be CPU.
-        :param multiprocessing_enabled: uses multiprocessing to parallelize parts of the inference when enabled, defaults to False.
+        :param num_workers: processes used for the RDKit postprocessing (1 = in-process).
+        :param precision: 'fp32', or 'fp16' / 'bf16' autocast on CUDA.
+        :param fast_decoding: greedy decoding with a fixed batch and a preallocated KV cache (same results).
+        :param cuda_graph: on CUDA, replay each decoding step as a captured CUDA graph (needs fast_decoding).
         """
-        model_states = torch.load(model_path, map_location=torch.device('cpu'))
+        model_states = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
         args = self._get_args(model_states['args'])
         # checkpoints store use_checkpoint=True from training; activation checkpointing is pure overhead at inference
         args.use_checkpoint = False
         if device is None:
             device = torch.device('cpu')
-        self.device = device
+        self.device = torch.device(device)
+        if precision not in PRECISIONS:
+            raise ValueError(f"precision must be one of {list(PRECISIONS)}")
+        self.precision = precision
         self.tokenizer = get_tokenizer(args)
         self.encoder, self.decoder = self._get_model(args, self.tokenizer, self.device, model_states)
-        self.transform = get_transforms(args.input_size, augment=False)
+        for module in self.decoder.modules():
+            if isinstance(module, TransformerDecoderAR):
+                module.fast_decoding = fast_decoding
+                module.use_cuda_graph = fast_decoding and cuda_graph and self.device.type == 'cuda'
+        self.transform = InferenceTransform(args.input_size)
         self.num_workers = num_workers
+
+    def _autocast(self):
+        dtype = PRECISIONS[self.precision]
+        if dtype is None or self.device.type != 'cuda':
+            return contextlib.nullcontext()
+        # the autocast weight cache must be off while CUDA graphs are captured
+        return torch.autocast('cuda', dtype=dtype, cache_enabled=False)
 
     def _get_args(self, args_states=None):
         parser = argparse.ArgumentParser()
@@ -99,9 +117,9 @@ class MolScribe:
 
         for idx in range(0, len(input_images), batch_size):
             batch_images = input_images[idx:idx+batch_size]
-            images = [self.transform(image=image, keypoints=[])['image'] for image in batch_images]
+            images = [self.transform(image) for image in batch_images]
             images = torch.stack(images, dim=0).to(device)
-            with torch.no_grad():
+            with torch.no_grad(), self._autocast():
                 features, hiddens = self.encoder(images)
                 batch_predictions = self.decoder.decode(features, hiddens)
             predictions += batch_predictions
@@ -164,6 +182,8 @@ class MolScribe:
             [image_file], return_atoms_bonds=return_atoms_bonds, return_confidence=return_confidence)[0]
 
     def draw_prediction(self, prediction, image, notebook=False):
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
         if "atoms" not in prediction or "bonds" not in prediction:
             raise ValueError("atoms and bonds information are not provided.")
         h, w, _ = image.shape

@@ -538,6 +538,49 @@ def _expand_functional_group(mol, mappings, debug=False):
     return smiles, mol
 
 
+COORDINATING_ELEMENTS = {'N', 'O', 'P', 'S', 'As', 'Se'}
+
+
+def _explicit_valence(atom):
+    # dative bonds do not count for the donor atom
+    return sum(bond.GetBondTypeAsDouble() for bond in atom.GetBonds()
+               if bond.GetBondType() != Chem.BondType.DATIVE) + atom.GetNumExplicitHs()
+
+
+def _coordination_bonds_to_dative(mol):
+    """
+    Rewrite metal-ligand single bonds as dative bonds (ligand -> metal) when
+    - the drawing uses PubChem-style charge separation ([N+]-[Ni-2] -> N->Ni, charges cancel), or
+    - the neutral ligand atom would otherwise exceed its valence (pyridine n, amine N, phosphine P bonded to a metal).
+    Covalent metal-ligand bonds (M-C, M-Cl, M-O in alkoxides ...) are left untouched.
+    """
+    mol = Chem.RWMol(mol)
+    mol.UpdatePropertyCache(strict=False)
+    periodic_table = Chem.GetPeriodicTable()
+    for bond in list(mol.GetBonds()):
+        if bond.GetBondType() != Chem.BondType.SINGLE:
+            continue
+        a, b = bond.GetBeginAtom(), bond.GetEndAtom()
+        if (a.GetSymbol() in METALS) == (b.GetSymbol() in METALS):
+            continue
+        metal, donor = (a, b) if a.GetSymbol() in METALS else (b, a)
+        if donor.GetSymbol() not in COORDINATING_ELEMENTS:
+            continue
+        charge_separated = donor.GetFormalCharge() > 0 and metal.GetFormalCharge() < 0
+        allowed = periodic_table.GetValenceList(donor.GetAtomicNum())
+        over_valent = donor.GetFormalCharge() == 0 and _explicit_valence(donor) > max(allowed)
+        if not (charge_separated or over_valent):
+            continue
+        donor_idx, metal_idx = donor.GetIdx(), metal.GetIdx()
+        mol.RemoveBond(donor_idx, metal_idx)
+        mol.AddBond(donor_idx, metal_idx, Chem.BondType.DATIVE)
+        if charge_separated:
+            donor.SetFormalCharge(donor.GetFormalCharge() - 1)
+            metal.SetFormalCharge(metal.GetFormalCharge() + 1)
+        mol.UpdatePropertyCache(strict=False)
+    return mol.GetMol()
+
+
 def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
     mol = Chem.RWMol()
     n = len(symbols)
@@ -599,6 +642,9 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
         # TODO: make sure molblock has the abbreviation information
         pred_molblock = Chem.MolToMolBlock(mol)
         pred_smiles, mol = _expand_functional_group(mol, {}, debug)
+        if any(atom.GetSymbol() in METALS for atom in mol.GetAtoms()):
+            mol = _coordination_bonds_to_dative(mol)
+            pred_smiles = Chem.MolToSmiles(mol)
         success = True
     except Exception as e:
         if debug:
