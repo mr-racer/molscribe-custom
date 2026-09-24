@@ -272,14 +272,16 @@ EXTRA_SUBSTITUTIONS: List[Substitution] = [
     _extra(['PPh3+', 'Ph3P+'], "[P+](c1ccccc1)(c1ccccc1)c1ccccc1"),
 
     # Counter-ions (drawn without bonds)
-    _extra(['BF4', 'BF4-'], "F[B-](F)(F)F"),
-    _extra(['PF6', 'PF6-'], "F[P-](F)(F)(F)(F)F"),
-    _extra(['SbF6', 'SbF6-'], "F[Sb-](F)(F)(F)(F)F"),
-    _extra(['AsF6', 'AsF6-'], "F[As-](F)(F)(F)(F)F"),
-    _extra(['ClO4', 'ClO4-'], "[O-][Cl+3]([O-])([O-])[O-]"),
-    _extra(['OTf-', 'TfO-', 'CF3SO3-', 'CF3SO3'], "[O-]S(=O)(=O)C(F)(F)F"),
-    _extra(['NTf2-', 'Tf2N-'], "[N-](S(=O)(=O)C(F)(F)F)S(=O)(=O)C(F)(F)F"),
-    _extra(['OTs-', 'TsO-'], "[O-]S(=O)(=O)c1ccc(C)cc1"),
+    _extra(['BF4', 'BF4-'], "F[B-](F)(F)F", 0),
+    _extra(['PF6', 'PF6-'], "F[P-](F)(F)(F)(F)F", 0),
+    _extra(['SbF6', 'SbF6-'], "F[Sb-](F)(F)(F)(F)F", 0),
+    _extra(['AsF6', 'AsF6-'], "F[As-](F)(F)(F)(F)F", 0),
+    _extra(['ClO4', 'ClO4-'], "[O-][Cl+3]([O-])([O-])[O-]", 0),
+    _extra(['OTf-', 'TfO-', 'CF3SO3-', 'CF3SO3', 'OTf', 'TfO'], "[O-]S(=O)(=O)C(F)(F)F", 0),
+    _extra(['NTf2-', 'Tf2N-', 'NTf2', 'Tf2N'], "[N-](S(=O)(=O)C(F)(F)F)S(=O)(=O)C(F)(F)F", 0),
+    _extra(['OTs-', 'TsO-', 'OTs', 'TsO'], "[O-]S(=O)(=O)c1ccc(C)cc1", 0),
+    _extra(['OMs-', 'MsO-', 'OMs', 'MsO'], "[O-]S(C)(=O)=O", 0),
+    _extra(['OAc-', 'AcO-', 'OAc', 'AcO'], "CC(=O)[O-]", 0),
 
     # In-line groups drawn with a bond on each side (Markush / patent style). Atom 0 takes the left neighbour;
     # a second radical atom, when present, takes the right one.
