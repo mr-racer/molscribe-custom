@@ -47,7 +47,7 @@ def main():
     for i in range(0, len(images), args.batch_size):
         batch = images[i:i + args.batch_size]
         t0 = time.perf_counter()
-        x = torch.stack([model.transform(img) for img in batch]).to(model.device)
+        x = model._to_model_input(model._prepare(batch))  # threaded, but not overlapped with the model here
         sync(); t1 = time.perf_counter()
         with torch.no_grad(), model._autocast():
             feats, hid = model.encoder(x)

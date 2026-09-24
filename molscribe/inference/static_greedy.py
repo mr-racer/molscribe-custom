@@ -186,8 +186,9 @@ class StaticGreedyDecoder:
 
     def _decode_graph(self, memory_bank):
         b, device = memory_bank.size(0), memory_bank.device
-        dtype = torch.get_autocast_gpu_dtype() if torch.is_autocast_enabled() else memory_bank.dtype
-        key = (b, dtype, memory_bank.size(1))
+        dtype = torch.get_autocast_dtype('cuda') if torch.is_autocast_enabled('cuda') else memory_bank.dtype
+        # kernels (incl. TF32 use) are fixed at capture time
+        key = (b, dtype, memory_bank.size(1), torch.backends.cuda.matmul.allow_tf32)
         if key not in self._graphs:
             self._graphs[key] = self._build_graph(b, dtype, device, memory_bank.shape)
         g = self._graphs[key]

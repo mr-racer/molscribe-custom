@@ -40,7 +40,7 @@ def load_image(path):
     return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 
 
-def check_transforms(images):
+def check_transforms(images, device):
     try:
         from molscribe.dataset import get_transforms
     except ImportError as e:
@@ -49,9 +49,15 @@ def check_transforms(images):
     import torch
     from molscribe.transforms import InferenceTransform
     ref, new = get_transforms(384, augment=False), InferenceTransform(384)
-    bad = sum(not torch.equal(ref(image=img, keypoints=[])["image"], new(img)) for img in images)
-    print(f"[transforms] bitwise equal on {len(images) - bad}/{len(images)} images")
-    return bad == 0
+    bad = bad_dev = 0
+    for img in images:
+        expected = ref(image=img, keypoints=[])["image"]
+        bad += not torch.equal(expected, new(img))
+        on_device = new.normalize(torch.from_numpy(new.prepare(img)).unsqueeze(0).to(device))[0].cpu()
+        bad_dev += not torch.equal(expected, on_device)
+    print(f"[transforms] bitwise equal on {len(images) - bad}/{len(images)} images (CPU), "
+          f"{len(images) - bad_dev}/{len(images)} ({device} normalize)")
+    return bad == 0 and bad_dev == 0
 
 
 def raw_predictions(model, images, batch_size, fast, precision="fp32", cuda_graph=False):
@@ -64,7 +70,7 @@ def raw_predictions(model, images, batch_size, fast, precision="fp32", cuda_grap
     model.precision = precision
     preds = []
     for i in range(0, len(images), batch_size):
-        x = torch.stack([model.transform(img) for img in images[i:i + batch_size]]).to(model.device)
+        x = model._to_model_input(model._prepare(images[i:i + batch_size]))
         with torch.no_grad(), model._autocast():
             feats, hid = model.encoder(x)
             preds += model.decoder.decode(feats, hid)
@@ -91,7 +97,7 @@ def main():
     if args.limit:
         rows = rows[:args.limit]
     images = [load_image(os.path.join(args.data, r["image"])) for r in rows]
-    ok &= check_transforms(images)
+    ok &= check_transforms(images, args.device)
 
     import torch
     from molscribe import MolScribe
@@ -100,11 +106,11 @@ def main():
     n = len(images)
     configs = [(1, "fp32", False), (8, "fp32", False)]
     if args.device.startswith("cuda"):
-        configs += [(1, "fp32", True), (32, "fp32", True), (32, "fp16", True), (32, "bf16", True)]
+        configs += [(1, "fp32", True), (32, "fp32", True), (32, "tf32", True), (32, "fp16", True), (32, "bf16", True)]
     for bs, precision, graph in configs:
         new = raw_predictions(model, images, bs, fast=True, precision=precision, cuda_graph=graph)
         diff = compare(ref, new)
-        exact = precision == "fp32"
+        exact = precision == "fp32"  # tf32/fp16/bf16 round matmul inputs
         print(f"[decode] fast bs={bs:<3d} {precision} cuda_graph={graph}: {n - diff}/{n} graphs identical to reference"
               + ("" if exact else "  (reduced precision: differences expected, check accuracy instead)"))
         ok &= diff == 0 or not exact

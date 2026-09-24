@@ -1,5 +1,7 @@
 import argparse
 import contextlib
+import os
+from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
 import cv2
@@ -11,7 +13,18 @@ from .model import Encoder, Decoder, TransformerDecoderAR
 from .chemistry import convert_graph_to_smiles
 from .tokenizer import get_tokenizer
 
-PRECISIONS = {'fp32': None, 'fp16': torch.float16, 'bf16': torch.bfloat16}
+# autocast dtype per precision; 'tf32' keeps fp32 tensors but lets matmuls use TF32 tensor cores
+PRECISIONS = {'fp32': None, 'tf32': None, 'fp16': torch.float16, 'bf16': torch.bfloat16}
+
+
+@contextlib.contextmanager
+def _allow_tf32():
+    previous = torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
 
 
 BOND_TYPES = ["", "single", "double", "triple", "aromatic", "solid wedge", "dashed wedge"]
@@ -26,15 +39,18 @@ def safe_load(module, module_states):
 
 class MolScribe:
 
-    def __init__(self, model_path, device=None, num_workers=1, precision='fp32', fast_decoding=True, cuda_graph=True):
+    def __init__(self, model_path, device=None, num_workers=1, precision='fp32', fast_decoding=True, cuda_graph=True,
+                 preprocess_threads=None):
         """
         MolScribe Interface
         :param model_path: path of the model checkpoint.
         :param device: torch device, defaults to be CPU.
         :param num_workers: processes used for the RDKit postprocessing (1 = in-process).
-        :param precision: 'fp32', or 'fp16' / 'bf16' autocast on CUDA.
+        :param precision: 'fp32', 'tf32' (TF32 matmuls), or 'fp16' / 'bf16' autocast on CUDA.
         :param fast_decoding: greedy decoding with a fixed batch and a preallocated KV cache (same results).
         :param cuda_graph: on CUDA, replay each decoding step as a captured CUDA graph (needs fast_decoding).
+        :param preprocess_threads: threads that prepare the next batch while the current one runs on the model
+            (default: min(8, cpu count); 0 disables).
         """
         model_states = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
         args = self._get_args(model_states['args'])
@@ -54,13 +70,32 @@ class MolScribe:
                 module.use_cuda_graph = fast_decoding and cuda_graph and self.device.type == 'cuda'
         self.transform = InferenceTransform(args.input_size)
         self.num_workers = num_workers
+        if preprocess_threads is None:
+            preprocess_threads = min(8, os.cpu_count() or 1)
+        self._pool = ThreadPoolExecutor(preprocess_threads) if preprocess_threads > 0 else None
 
     def _autocast(self):
+        if self.device.type != 'cuda':
+            return contextlib.nullcontext()
+        if self.precision == 'tf32':
+            return _allow_tf32()
         dtype = PRECISIONS[self.precision]
-        if dtype is None or self.device.type != 'cuda':
+        if dtype is None:
             return contextlib.nullcontext()
         # the autocast weight cache must be off while CUDA graphs are captured
         return torch.autocast('cuda', dtype=dtype, cache_enabled=False)
+
+    def _prepare(self, images):
+        """Start preprocessing a batch; OpenCV releases the GIL, so this overlaps with model work."""
+        if self._pool is None:
+            return [self.transform.prepare(image) for image in images]
+        return [self._pool.submit(self.transform.prepare, image) for image in images]
+
+    def _to_model_input(self, prepared):
+        gray = torch.from_numpy(np.stack([p.result() if self._pool is not None else p for p in prepared]))
+        if self.device.type == 'cuda':
+            gray = gray.pin_memory().to(self.device, non_blocking=True)
+        return self.transform.normalize(gray.to(self.device))
 
     def _get_args(self, args_states=None):
         parser = argparse.ArgumentParser()
@@ -111,14 +146,15 @@ class MolScribe:
         return encoder, decoder
 
     def predict_images(self, input_images: List, return_atoms_bonds=False, return_confidence=False, batch_size=16):
-        device = self.device
         predictions = []
         self.decoder.compute_confidence = return_confidence
 
-        for idx in range(0, len(input_images), batch_size):
-            batch_images = input_images[idx:idx+batch_size]
-            images = [self.transform(image) for image in batch_images]
-            images = torch.stack(images, dim=0).to(device)
+        batches = [input_images[idx:idx+batch_size] for idx in range(0, len(input_images), batch_size)]
+        pending = self._prepare(batches[0]) if batches else None
+        for b in range(len(batches)):
+            images = self._to_model_input(pending)
+            if b + 1 < len(batches):
+                pending = self._prepare(batches[b + 1])  # prepared by the thread pool while this batch runs
             with torch.no_grad(), self._autocast():
                 features, hiddens = self.encoder(images)
                 batch_predictions = self.decoder.decode(features, hiddens)
