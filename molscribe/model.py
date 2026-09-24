@@ -135,6 +135,7 @@ class TransformerDecoderAR(TransformerDecoderBase):
             word_padding_idx=PAD_ID,
             position_encoding=True,
             dropout=args.hidden_dropout)
+        self._output_mask_table = None
 
     def dec_embedding(self, tgt, step=None):
         pad_idx = self.embeddings.word_padding_idx
@@ -185,6 +186,13 @@ class TransformerDecoderAR(TransformerDecoderBase):
         # (2) prep decode_strategy. Possibly repeat src objects.
         _, memory_bank = decode_strategy.initialize(memory_bank=memory_bank)
 
+        if self.tokenizer.output_constraint:
+            # the mask only depends on the previous token: look it up on the device instead of building Python lists
+            # (and forcing a GPU->CPU sync) at every step
+            if self._output_mask_table is None or self._output_mask_table.device != memory_bank.device:
+                table = [self.tokenizer.get_output_mask(id) for id in range(self.vocab_size)]
+                self._output_mask_table = torch.tensor(table, dtype=torch.bool, device=memory_bank.device)
+
         # (3) Begin decoding step by step:
         for step in range(decode_strategy.max_length):
             tgt = decode_strategy.current_predictions.view(-1, 1, 1)
@@ -192,7 +200,12 @@ class TransformerDecoderAR(TransformerDecoderBase):
                 label = labels[:, step].view(-1, 1, 1)
                 mask = label.eq(MASK_ID).long()
                 tgt = tgt * mask + label * (1 - mask)
-            tgt_emb, tgt_pad_mask = self.dec_embedding(tgt)
+            # PositionalEncoding indexes its table with dim 0, which is the batch dim here: with a (b, 1, 1) input,
+            # sequence i would get pe[i] (and a different one whenever finished sequences are dropped), so the
+            # prediction depended on the position of the image in the batch. Embedding the batch as a single "row"
+            # gives every sequence pe[0], i.e. exactly the batch_size=1 behaviour, for any batch composition.
+            tgt_pad_mask = tgt.data.eq(self.embeddings.word_padding_idx).transpose(1, 2)
+            tgt_emb = self.embeddings(tgt.transpose(0, 1)).transpose(0, 1)
             dec_out, dec_attn, *_ = self.decoder(tgt_emb=tgt_emb, memory_bank=memory_bank,
                                                  tgt_pad_mask=tgt_pad_mask, step=step)
 
@@ -203,9 +216,7 @@ class TransformerDecoderAR(TransformerDecoderBase):
             log_probs = F.log_softmax(dec_logits, dim=-1)
 
             if self.tokenizer.output_constraint:
-                output_mask = [self.tokenizer.get_output_mask(id) for id in tgt.view(-1).tolist()]
-                output_mask = torch.tensor(output_mask, device=log_probs.device)
-                log_probs.masked_fill_(output_mask, -10000)
+                log_probs.masked_fill_(self._output_mask_table[tgt.view(-1)], -10000)
 
             label = labels[:, step + 1] if labels is not None and step + 1 < labels.size(1) else None
             decode_strategy.advance(log_probs, attn, dec_out, label)
@@ -291,15 +302,15 @@ def get_edge_prediction(edge_prob):
     n = len(edge_prob)
     if n == 0:
         return [], []
-    for i in range(n):
-        for j in range(i + 1, n):
-            for k in range(5):
-                edge_prob[i][j][k] = (edge_prob[i][j][k] + edge_prob[j][i][k]) / 2
-                edge_prob[j][i][k] = edge_prob[i][j][k]
-            edge_prob[i][j][5] = (edge_prob[i][j][5] + edge_prob[j][i][6]) / 2
-            edge_prob[i][j][6] = (edge_prob[i][j][6] + edge_prob[j][i][5]) / 2
-            edge_prob[j][i][5] = edge_prob[i][j][6]
-            edge_prob[j][i][6] = edge_prob[i][j][5]
+    # symmetrize p(i->j) and p(j->i); wedge (5) and dash (6) swap meaning when the bond is read from the other end
+    prob = np.asarray(edge_prob, dtype=np.float64)
+    prob_t = prob.transpose(1, 0, 2)
+    edge_prob = np.empty_like(prob)
+    edge_prob[..., :5] = (prob[..., :5] + prob_t[..., :5]) / 2
+    edge_prob[..., 5] = (prob[..., 5] + prob_t[..., 6]) / 2
+    edge_prob[..., 6] = (prob[..., 6] + prob_t[..., 5]) / 2
+    diag = np.arange(n)
+    edge_prob[diag, diag] = prob[diag, diag]
     prediction = np.argmax(edge_prob, axis=2).tolist()
     score = np.max(edge_prob, axis=2).tolist()
     return prediction, score

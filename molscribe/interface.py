@@ -34,6 +34,8 @@ class MolScribe:
         """
         model_states = torch.load(model_path, map_location=torch.device('cpu'))
         args = self._get_args(model_states['args'])
+        # checkpoints store use_checkpoint=True from training; activation checkpointing is pure overhead at inference
+        args.use_checkpoint = False
         if device is None:
             device = torch.device('cpu')
         self.device = device

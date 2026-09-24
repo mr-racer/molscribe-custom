@@ -1,4 +1,5 @@
 import copy
+import re
 import traceback
 import numpy as np
 import multiprocessing
@@ -11,7 +12,8 @@ rdkit.RDLogger.DisableLog('rdApp.*')
 
 from SmilesPE.pretokenizer import atomwise_tokenizer
 
-from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, VALENCES, FORMULA_REGEX
+from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, UPPERCASE_ABBREVIATIONS, VALENCES, FORMULA_REGEX, \
+    METALS, LIGAND_SMILES, ORGANIC_SET
 
 
 def is_valid_mol(s, format_='atomtok'):
@@ -354,14 +356,35 @@ def _condensed_formula_list_to_smiles(formula_list, start_bond, end_bond=None, d
     return dfs('', start_bond, cur_idx, add_idx)
 
 
+N_ALKYL_REGEX = re.compile(r'^(?:n-?)?C(\d+)H(\d+)$')
+
+
+def _lookup_abbreviation(symbol):
+    """SMILES of a known abbreviation (exact, all-caps variant, or linear alkyl CnH2n+1), else None."""
+    if symbol in ABBREVIATIONS:
+        return ABBREVIATIONS[symbol].smiles
+    if symbol.isupper() and symbol in UPPERCASE_ABBREVIATIONS:
+        return ABBREVIATIONS[UPPERCASE_ABBREVIATIONS[symbol]].smiles
+    match = N_ALKYL_REGEX.match(symbol)
+    if match:
+        n, h = int(match.group(1)), int(match.group(2))
+        if 1 <= n <= 30 and h == 2 * n + 1:
+            return '[CH3]' if n == 1 else '[CH2]' + 'C' * (n - 1)
+    return None
+
+
 def get_smiles_from_symbol(symbol, mol, atom, bonds):
     """
     Convert symbol (abbrev. or condensed formula) to smiles
     If condensed formula, determine parsing direction and num. bonds on each side using coordinates
     """
-    if symbol in ABBREVIATIONS:
-        return ABBREVIATIONS[symbol].smiles
+    smiles = _lookup_abbreviation(symbol)
+    if smiles is not None:
+        return smiles
     if len(symbol) > 20:
+        return None
+    # Characters the tokenizer cannot explain would be silently dropped (e.g. "c-Pr" -> "Pr"); refuse instead.
+    if ''.join(FORMULA_REGEX.findall(symbol)) != symbol:
         return None
 
     total_bonds = int(sum([bond.GetBondTypeAsDouble() for bond in bonds]))
@@ -438,7 +461,17 @@ def _expand_functional_group(mol, mappings, debug=False):
                     continue
 
                 bonds = atom.GetBonds()
-                sub_smiles = get_smiles_from_symbol(symbol, mol_w, atom, bonds)
+                # read bond info before the bonds are removed below
+                adjacent_indices = [bond.GetOtherAtomIdx(i) for bond in bonds]
+                bond_orders = [int(bond.GetBondTypeAsDouble()) for bond in bonds]
+
+                # ligands (CO, PPh3, MeCN ...) bonded only to metals are attached with dative bonds
+                is_ligand = symbol in LIGAND_SMILES and len(adjacent_indices) > 0 and \
+                    all(mol_w.GetAtomWithIdx(idx).GetSymbol() in METALS for idx in adjacent_indices)
+                if is_ligand:
+                    sub_smiles = LIGAND_SMILES[symbol]
+                else:
+                    sub_smiles = get_smiles_from_symbol(symbol, mol_w, atom, bonds)
 
                 # create mol object for abbreviation/condensed formula from its SMILES
                 mol_r = convert_smiles_to_mol(sub_smiles)
@@ -449,13 +482,12 @@ def _expand_functional_group(mol, mappings, debug=False):
                     continue
 
                 # remove bonds connected to abbreviation/condensed formula
-                adjacent_indices = [bond.GetOtherAtomIdx(i) for bond in bonds]
                 for adjacent_idx in adjacent_indices:
                     mol_w.RemoveBond(i, adjacent_idx)
 
                 adjacent_atoms = [mol_w.GetAtomWithIdx(adjacent_idx) for adjacent_idx in adjacent_indices]
-                for adjacent_atom, bond in zip(adjacent_atoms, bonds):
-                    adjacent_atom.SetNumRadicalElectrons(int(bond.GetBondTypeAsDouble()))
+                for adjacent_atom, bond_order in zip(adjacent_atoms, bond_orders):
+                    adjacent_atom.SetNumRadicalElectrons(bond_order)
 
                 # get indices of atoms of main body that connect to substituent
                 bonding_atoms_w = adjacent_indices
@@ -472,6 +504,9 @@ def _expand_functional_group(mol, mappings, debug=False):
                 mol_w = Chem.RWMol(combo)
                 # if len(bonding_atoms_r) == 1:  # substituent uses one atom to bond to main body
                 for atm in bonding_atoms_w:
+                    if is_ligand:
+                        mol_w.AddBond(bonding_atoms_r[0], atm, order=Chem.BondType.DATIVE)
+                        continue
                     bond_order = mol_w.GetAtomWithIdx(atm).GetNumRadicalElectrons()
                     mol_w.AddBond(atm, bonding_atoms_r[0], order=BOND_TYPES[bond_order])
 
@@ -480,6 +515,14 @@ def _expand_functional_group(mol, mappings, debug=False):
                     mol_w.GetAtomWithIdx(atm).SetNumRadicalElectrons(0)
                 for atm in bonding_atoms_r:
                     mol_w.GetAtomWithIdx(atm).SetNumRadicalElectrons(0)
+                # derive the H count of a heteroatom attachment atom from its final valence, so that the same group
+                # works as a terminal group and inside a ring (NMe -> NHMe vs. N-methyl, NBoc -> NHBoc vs. N-Boc).
+                # Carbon is excluded on purpose: a Me/Et label with too many bonds is a model error and should stay
+                # visibly invalid rather than silently become CH2.
+                attach_atom = mol_w.GetAtomWithIdx(bonding_atoms_r[0])
+                if bonding_atoms_w and not is_ligand and attach_atom.GetSymbol() in ORGANIC_SET - {'C'}:
+                    attach_atom.SetNumExplicitHs(0)
+                    attach_atom.SetNoImplicit(False)
                 atoms_to_remove.append(i)
 
         # Remove atom in the end, otherwise the id will change
@@ -487,6 +530,7 @@ def _expand_functional_group(mol, mappings, debug=False):
         atoms_to_remove.sort(reverse=True)
         for i in atoms_to_remove:
             mol_w.RemoveAtom(i)
+        mol_w.UpdatePropertyCache(strict=False)
         smiles = Chem.MolToSmiles(mol_w)
         mol = mol_w.GetMol()
     else:
