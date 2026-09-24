@@ -6,17 +6,32 @@ ORGANIC_SET = {'B', 'C', 'N', 'O', 'P', 'S', 'F', 'Cl', 'Br', 'I'}
 RGROUP_SYMBOLS = ['R', 'R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9', 'R10', 'R11', 'R12',
                   'Ra', 'Rb', 'Rc', 'Rd', 'X', 'Y', 'Z', 'Q', 'A', 'E', 'Ar']
 
+# Variable-group placeholders as they appear in papers and patents: R with digit / prime / Greek / Latin suffixes,
+# Ar', X', generic role labels (EWG, LG, Nu, PG ...). These become wildcard atoms, never expanded.
+RGROUP_REGEX = re.compile(
+    r"^(?:R(?:\d{0,2}|[a-d])|(?:Ar|Het|Alk|Hal|Cat|EWG|EDG|DG|LG|FG|PG|Nu|Nuc|El|E|M|L|X|Y|Z|Q|A|W|GROUP)\d{0,2})"
+    r"(?:['′″]{0,2})(?:[α-ω]|\d{0,2})?(?:['′″]{0,2})[+-]?$")
+
+
+def is_rgroup(symbol):
+    # a dictionary entry always wins over the placeholder pattern (Ac, Ad, ... are real groups)
+    return symbol not in ABBREVIATIONS and (symbol in RGROUP_SYMBOLS or bool(RGROUP_REGEX.match(symbol)))
+
+
 PLACEHOLDER_ATOMS = ["Lv", "Lu", "Nd", "Yb", "At", "Fm", "Er"]
 
 
 class Substitution(object):
     '''Define common substitutions for chemical shorthand'''
-    def __init__(self, abbrvs, smarts, smiles, probability):
+    def __init__(self, abbrvs, smarts, smiles, probability, n_attach=1):
         assert type(abbrvs) is list
         self.abbrvs = abbrvs
         self.smarts = smarts
         self.smiles = smiles
         self.probability = probability
+        # number of bonds the label makes in the drawing; the same label may have entries for several values
+        # (CO: ligand with 1 bond, carbonyl with 2; THF: substituent with 1 bond, solvent molecule with 0)
+        self.n_attach = n_attach
 
 
 SUBSTITUTIONS: List[Substitution] = [
@@ -91,9 +106,9 @@ SUBSTITUTIONS: List[Substitution] = [
 ]
 
 
-def _extra(abbrvs, smiles):
+def _extra(abbrvs, smiles, n_attach=1):
     # Inference-only: expanded when predicted, never rendered into synthetic training images (no SMARTS).
-    return Substitution(abbrvs, None, smiles, 0.0)
+    return Substitution(abbrvs, None, smiles, 0.0, n_attach)
 
 
 EXTRA_SUBSTITUTIONS: List[Substitution] = [
@@ -265,9 +280,34 @@ EXTRA_SUBSTITUTIONS: List[Substitution] = [
     _extra(['OTf-', 'TfO-', 'CF3SO3-', 'CF3SO3'], "[O-]S(=O)(=O)C(F)(F)F"),
     _extra(['NTf2-', 'Tf2N-'], "[N-](S(=O)(=O)C(F)(F)F)S(=O)(=O)C(F)(F)F"),
     _extra(['OTs-', 'TsO-'], "[O-]S(=O)(=O)c1ccc(C)cc1"),
+
+    # In-line groups drawn with a bond on each side (Markush / patent style). Atom 0 takes the left neighbour;
+    # a second radical atom, when present, takes the right one.
+    _extra(['CO', 'C(O)', 'C(=O)'], "[C]=O", 2),
+    _extra(['CO2', 'COO', 'C(O)O', 'C(=O)O'], "[C](=O)[O]", 2),
+    _extra(['O2C', 'OOC', 'OC(O)', 'OC(=O)'], "[O][C]=O", 2),
+    _extra(['CONH', 'C(O)NH', 'C(=O)NH'], "[C](=O)[NH]", 2),
+    _extra(['NHCO', 'NHC(O)', 'NHC(=O)'], "[NH][C]=O", 2),
+    _extra(['NHCONH', 'NHC(O)NH'], "[NH]C(=O)[NH]", 2),
+    _extra(['SO2', 'S(O)2', 'S(O2)'], "[S](=O)=O", 2),
+    _extra(['SO2NH', 'S(O)2NH'], "[S](=O)(=O)[NH]", 2),
+    _extra(['NHSO2', 'NHS(O)2'], "[NH][S](=O)=O", 2),
+    _extra(['OCH2O'], "[O]C[O]", 2),
+    _extra(['CH2CH2', '(CH2)2'], "[CH2][CH2]", 2),
+    _extra(['CH=CH'], "[CH]=[CH]", 2),
+    _extra(['N=N'], "[N]=[N]", 2),
+    # --- BEGIN GENERATED ABBREVIATIONS (benchmark/abbrev_merge.py) ---
+    # --- END GENERATED ABBREVIATIONS ---
 ]
 
-ABBREVIATIONS = {abbrv: sub for sub in SUBSTITUTIONS + EXTRA_SUBSTITUTIONS for abbrv in sub.abbrvs}
+# label -> default entry (n_attach == 1 when available); (label, n_attach) -> entry for bond-count-specific lookup
+ABBREVIATIONS_BY_ATTACH = {(abbrv, sub.n_attach): sub for sub in SUBSTITUTIONS + EXTRA_SUBSTITUTIONS
+                           for abbrv in sub.abbrvs}
+ABBREVIATIONS = {}
+for _sub in SUBSTITUTIONS + EXTRA_SUBSTITUTIONS:
+    for _abbrv in _sub.abbrvs:
+        if _abbrv not in ABBREVIATIONS or (ABBREVIATIONS[_abbrv].n_attach != 1 and _sub.n_attach == 1):
+            ABBREVIATIONS[_abbrv] = _sub
 
 # Case-insensitive fallback for labels drawn in all caps (BOC, CBZ, FMOC, NHBOC ...). Only keys of >= 3 chars are
 # considered, and only all-uppercase labels are looked up, so element symbols such as Co/Cs/Sn are never affected.
@@ -301,7 +341,7 @@ LIGAND_SMILES = {
 }
 
 VALENCES = {
-    "H": [1], "Li": [1], "Be": [2], "B": [3], "C": [4], "N": [3, 5], "O": [2], "F": [1],
+    "H": [1], "D": [1], "T": [1], "Li": [1], "Be": [2], "B": [3], "C": [4], "N": [3, 5], "O": [2], "F": [1],
     "Na": [1], "Mg": [2], "Al": [3], "Si": [4], "P": [5, 3], "S": [6, 2, 4], "Cl": [1], "K": [1], "Ca": [2],
     "Br": [1], "I": [1],
     # metals / metalloids that appear in condensed labels (MgBr, ZnCl, SnMe3, HgCl, SePh, B(OH)2 ...)
@@ -345,6 +385,10 @@ IMPLAUSIBLE_ELEMENTS = {
 # tokens of condensed formula. Alternatives are tried in order, so longer tokens must come first (otherwise e.g.
 # "SO2NH2" is split as S + O2N + H2). Real element symbols are used instead of [A-Z][a-z]+ so that "OiPr" is not
 # tokenized as the fake element "Oi". Callers should reject formulas whose tokens do not cover the whole string.
+# Only single-bond entries take part in formula tokenization: inside a formula an abbreviation token is treated
+# as a monovalent unit, so in-line (2-bond) keys such as C(O) or SO2 must keep being parsed atom by atom.
 FORMULA_REGEX = re.compile(
-    '(' + _longest_first(ABBREVIATIONS) + '|' + _longest_first([r for r in RGROUP_SYMBOLS if len(r) > 1]) +
-    r'|R[0-9]*|' + _longest_first([e for e in ELEMENTS if e not in IMPLAUSIBLE_ELEMENTS]) + r'|[A-Z]|[0-9]+|\(|\))')
+    '(' + _longest_first([k for k, sub in ABBREVIATIONS.items() if sub.n_attach == 1]) + '|' +
+    _longest_first([r for r in RGROUP_SYMBOLS if len(r) > 1]) +
+    r"|R[0-9]*['′]*[α-ω]?|" + _longest_first([e for e in ELEMENTS if e not in IMPLAUSIBLE_ELEMENTS]) +
+    r'|D|T|[A-Z]|[0-9]+|\(|\))')

@@ -12,8 +12,8 @@ rdkit.RDLogger.DisableLog('rdApp.*')
 
 from SmilesPE.pretokenizer import atomwise_tokenizer
 
-from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, UPPERCASE_ABBREVIATIONS, VALENCES, FORMULA_REGEX, \
-    METALS, LIGAND_SMILES, ORGANIC_SET
+from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, ABBREVIATIONS_BY_ATTACH, UPPERCASE_ABBREVIATIONS, VALENCES, \
+    FORMULA_REGEX, METALS, LIGAND_SMILES, ORGANIC_SET, is_rgroup
 
 
 def is_valid_mol(s, format_='atomtok'):
@@ -185,9 +185,15 @@ def _parse_formula(formula: str):
     Example: "C2H4O" -> [('C', 2), ('H', 4), ('O', 1)]
     """
     tokens = FORMULA_REGEX.findall(formula)
-    # if ''.join(tokens) != formula:
-    #     tokens = FORMULA_REGEX_BACKUP.findall(formula)
-    return _parse_tokens(tokens)
+    # "NR2", "CR3", "PR2": a small digit right after R inside a formula is a count of identical R groups, not the
+    # number of an R group (R1, R2 ... are numbered only when they stand alone or start the label)
+    fixed = []
+    for k, tok in enumerate(tokens):
+        if k > 0 and re.fullmatch(r"R[23]", tok):
+            fixed += ["R", tok[1:]]
+        else:
+            fixed.append(tok)
+    return _parse_tokens(fixed)
 
 
 def _expand_carbon(elements: list):
@@ -230,6 +236,9 @@ def _expand_carbon(elements: list):
     return expanded
 
 
+HYDROGEN_ISOTOPES = {'D': '[2H]', 'T': '[3H]'}
+
+
 def _expand_abbreviation(abbrev):
     """
     Expand abbreviation into its SMILES; also converts [Rn] to [n*]
@@ -237,11 +246,20 @@ def _expand_abbreviation(abbrev):
     """
     if abbrev in ABBREVIATIONS:
         return ABBREVIATIONS[abbrev].smiles
-    if abbrev in RGROUP_SYMBOLS or (abbrev[0] == 'R' and abbrev[1:].isdigit()):
-        if abbrev[1:].isdigit():
+    if abbrev in HYDROGEN_ISOTOPES:
+        return HYDROGEN_ISOTOPES[abbrev]
+    if is_rgroup(abbrev):
+        if abbrev[0] == 'R' and abbrev[1:].isdigit():
             return f'[{abbrev[1:]}*]'
         return '*'
     return f'[{abbrev}]'
+
+
+def _rgroup_atom(symbol):
+    atom = Chem.Atom("*")
+    if symbol[0] == 'R' and symbol[1:].isdigit():
+        atom.SetIsotope(int(symbol[1:]))
+    return atom
 
 
 def _get_bond_symb(bond_num):
@@ -359,12 +377,15 @@ def _condensed_formula_list_to_smiles(formula_list, start_bond, end_bond=None, d
 N_ALKYL_REGEX = re.compile(r'^(?:n-?)?C(\d+)H(\d+)$')
 
 
-def _lookup_abbreviation(symbol):
-    """SMILES of a known abbreviation (exact, all-caps variant, or linear alkyl CnH2n+1), else None."""
+def _lookup_abbreviation(symbol, n_attach=None):
+    """SMILES of a known abbreviation (exact, all-caps variant, or linear alkyl CnH2n+1), else None.
+    With n_attach given, an entry for that bond count is preferred over the default (1-bond) entry."""
+    if symbol.isupper() and symbol not in ABBREVIATIONS and symbol in UPPERCASE_ABBREVIATIONS:
+        symbol = UPPERCASE_ABBREVIATIONS[symbol]
+    if n_attach is not None and (symbol, n_attach) in ABBREVIATIONS_BY_ATTACH:
+        return ABBREVIATIONS_BY_ATTACH[(symbol, n_attach)].smiles
     if symbol in ABBREVIATIONS:
         return ABBREVIATIONS[symbol].smiles
-    if symbol.isupper() and symbol in UPPERCASE_ABBREVIATIONS:
-        return ABBREVIATIONS[UPPERCASE_ABBREVIATIONS[symbol]].smiles
     match = N_ALKYL_REGEX.match(symbol)
     if match:
         n, h = int(match.group(1)), int(match.group(2))
@@ -380,7 +401,7 @@ def get_smiles_from_symbol(symbol, mol, atom, bonds):
     """
     # the decoder occasionally emits unbalanced brackets, e.g. "[[Co]"
     symbol = symbol.strip('[]')
-    smiles = _lookup_abbreviation(symbol)
+    smiles = _lookup_abbreviation(symbol, n_attach=len(bonds))
     if smiles is not None:
         return smiles
     if len(symbol) > 20:
@@ -459,13 +480,19 @@ def _expand_functional_group(mol, mappings, debug=False):
                 if not (isinstance(symbol, str) and len(symbol) > 0):
                     continue
                 # rgroups do not need to be expanded
-                if symbol in RGROUP_SYMBOLS:
+                if is_rgroup(symbol):
                     continue
 
                 bonds = atom.GetBonds()
                 # read bond info before the bonds are removed below
                 adjacent_indices = [bond.GetOtherAtomIdx(i) for bond in bonds]
                 bond_orders = [int(bond.GetBondTypeAsDouble()) for bond in bonds]
+                # x-coordinates of the neighbours decide which side of an in-line group they attach to
+                if mol_w.GetNumConformers() > 0:
+                    conf = mol_w.GetConformer()
+                    neighbour_x = {idx: conf.GetAtomPosition(idx).x for idx in adjacent_indices}
+                else:
+                    neighbour_x = {idx: k for k, idx in enumerate(adjacent_indices)}
 
                 # ligands (CO, PPh3, MeCN ...) bonded only to metals are attached with dative bonds
                 is_ligand = symbol in LIGAND_SMILES and len(adjacent_indices) > 0 and \
@@ -504,13 +531,21 @@ def _expand_functional_group(mol, mappings, debug=False):
 
                 # connect substituent to main body with bonds
                 mol_w = Chem.RWMol(combo)
-                # if len(bonding_atoms_r) == 1:  # substituent uses one atom to bond to main body
+                # A group with one attachment atom takes every bond of the label on that atom. A group with several
+                # attachment atoms (-NH-CO-, -Gly-) is read left to right: the leftmost neighbour goes to atom 0, the
+                # next one to the next attachment atom, any surplus neighbours to atom 0.
+                if len(bonding_atoms_r) > 1 and len(bonding_atoms_w) > 1:
+                    ordered = sorted(bonding_atoms_w, key=lambda idx: neighbour_x[idx])
+                    targets = {atm: bonding_atoms_r[min(k, len(bonding_atoms_r) - 1)] if k < len(bonding_atoms_r)
+                               else bonding_atoms_r[0] for k, atm in enumerate(ordered)}
+                else:
+                    targets = {atm: bonding_atoms_r[0] for atm in bonding_atoms_w}
                 for atm in bonding_atoms_w:
                     if is_ligand:
                         mol_w.AddBond(bonding_atoms_r[0], atm, order=Chem.BondType.DATIVE)
                         continue
                     bond_order = mol_w.GetAtomWithIdx(atm).GetNumRadicalElectrons()
-                    mol_w.AddBond(atm, bonding_atoms_r[0], order=BOND_TYPES[bond_order])
+                    mol_w.AddBond(atm, targets[atm], order=BOND_TYPES[bond_order])
 
                 # reset radical electrons
                 for atm in bonding_atoms_w:
@@ -521,10 +556,11 @@ def _expand_functional_group(mol, mappings, debug=False):
                 # works as a terminal group and inside a ring (NMe -> NHMe vs. N-methyl, NBoc -> NHBoc vs. N-Boc).
                 # Carbon is excluded on purpose: a Me/Et label with too many bonds is a model error and should stay
                 # visibly invalid rather than silently become CH2.
-                attach_atom = mol_w.GetAtomWithIdx(bonding_atoms_r[0])
-                if bonding_atoms_w and not is_ligand and attach_atom.GetSymbol() in ORGANIC_SET - {'C'}:
-                    attach_atom.SetNumExplicitHs(0)
-                    attach_atom.SetNoImplicit(False)
+                for atm in bonding_atoms_r:
+                    attach_atom = mol_w.GetAtomWithIdx(atm)
+                    if bonding_atoms_w and not is_ligand and attach_atom.GetSymbol() in ORGANIC_SET - {'C'}:
+                        attach_atom.SetNumExplicitHs(0)
+                        attach_atom.SetNoImplicit(False)
                 atoms_to_remove.append(i)
 
         # Remove atom in the end, otherwise the id will change
@@ -594,14 +630,15 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
         symbol = symbols[i]
         if symbol[0] == '[':
             symbol = symbol[1:-1]
-        if symbol in RGROUP_SYMBOLS:
-            atom = Chem.Atom("*")
-            if symbol[0] == 'R' and symbol[1:].isdigit():
-                atom.SetIsotope(int(symbol[1:]))
-            Chem.SetAtomAlias(atom, symbol)
-        elif symbol in ABBREVIATIONS:
+        if symbol in ABBREVIATIONS:
             atom = Chem.Atom("*")
             Chem.SetAtomAlias(atom, symbol)
+        elif is_rgroup(symbol):
+            atom = _rgroup_atom(symbol)
+            Chem.SetAtomAlias(atom, symbol)
+        elif symbol in ('D', 'T'):  # hydrogen isotopes are drawn as D / T, which RDKit does not read
+            atom = Chem.Atom(1)
+            atom.SetIsotope(2 if symbol == 'D' else 3)
         else:
             try:  # try to get SMILES of atom
                 atom = Chem.AtomFromSmiles(symbols[i])
