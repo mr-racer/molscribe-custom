@@ -28,6 +28,7 @@ DONOR_VALENCE = {'N': 3, 'P': 3, 'As': 3, 'S': 2, 'Se': 2}
 PHOSPHINE = Chem.MolFromSmarts('[PX3;H0;+0]')
 NITRILE = Chem.MolFromSmarts('[NX1;+0]#[C]')
 ACAC = Chem.MolFromSmarts('[O-]-[#6]=[#6]-[#6]=O')
+SIGMA_CP = Chem.MolFromSmarts('[!#1;!#6;!#7;!#8;!#9;!#15;!#16;!#17;!#35;!#53]-[#6;R]1-[#6]=[#6]-[#6]=[#6]-1')
 
 
 class Drop(Exception):
@@ -127,6 +128,8 @@ def reconnect(smiles):
     metals = [a for a in mol.GetAtoms() if complex_metal(a)]
     if not metals:
         raise Drop('no_metal')
+    if mol.HasSubstructMatch(SIGMA_CP):
+        raise Drop('sigma_cp')  # PubChem writes metallocenes with a sigma M-C bond; the figure is a sandwich
     if any(a.GetDegree() > 0 for a in metals):
         mol = _fix_bonded(mol).GetMol()
         mol.UpdatePropertyCache(strict=False)
