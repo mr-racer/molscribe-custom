@@ -75,5 +75,6 @@ $PY -m metal_ocsr.make_synth --root $ROOT --split train --workers 120
 | E0-baseline | base checkpoint, no training | `$PY -m metal_ocsr.eval_metal --root $ROOT --ckpt $BASE_CKPT --out eval/E0-baseline/epoch_00 --mlflow_run_name E0-baseline` |
 | smoke | 20 steps, pipeline check | `bash code/molscribe/metal_ocsr/run/smoke_train.sh` |
 | E1 | 6 epochs, metal synth + organic replay | `bash code/molscribe/metal_ocsr/run/train_E1.sh` (in tmux), then `bash code/molscribe/metal_ocsr/run/eval_run.sh E1` |
+| E1-control (optional) | same steps / LR curve, organic only | `bash code/molscribe/metal_ocsr/run/train_E1_control.sh`, then `eval_run.sh E1-control` |
 
 MLflow: http://localhost:5000, experiment `molscribe-metal-ocsr` (smoke runs: `molscribe-metal-ocsr-smoke`).
