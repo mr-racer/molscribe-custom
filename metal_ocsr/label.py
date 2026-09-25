@@ -52,6 +52,10 @@ def load_source(smiles):
         a.SetIsotope(0)
         if is_metal(a):
             a.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
+        # xyz2mol sometimes "fixes" a structure with alternating [c+]/[c-] charges; no figure looks like that.
+        # Charged carbons bonded to a metal (Cp-, carbenes, isocyanides, sigma-aryls) are the normal dative form.
+        if a.GetSymbol() == 'C' and a.GetFormalCharge() != 0 and not any(is_metal(n) for n in a.GetNeighbors()):
+            raise Skip('charged_carbon')
     return mol
 
 
@@ -145,10 +149,11 @@ def make_draft(src, depicted, show_charge):
             _readd(rw, m, x, Chem.BondType.SINGLE, 1)
         elif i != m:
             _readd(rw, m, x, btype, draw)
-        # an anionic donor ([Cl-]->M, or the charge-separated covalent [N-][Mo+] of CSD SMILES) is drawn neutral
+        # an anionic donor ([Cl-]->M, the charge-separated covalent [N-][Mo+] or imido [N-2] of CSD SMILES) is drawn
+        # neutral; its H count is frozen below, so clearing the charge changes nothing else
         donor = rw.GetAtomWithIdx(x)
-        if donor.GetFormalCharge() < 0 and (btype in DATIVE_TYPES or btype == Chem.BondType.SINGLE):
-            donor.SetFormalCharge(donor.GetFormalCharge() + 1)
+        if donor.GetFormalCharge() < 0:
+            donor.SetFormalCharge(0)
 
     metals = [a for a in rw.GetAtoms() if is_metal(a)]
     for a in rw.GetAtoms():
