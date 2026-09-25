@@ -114,6 +114,22 @@ PyTorch then raises `OutOfMemoryError` instead of overshooting; catch it and hal
 Running 3–4 containers with one model each is no longer needed: one process with `batch_size=64, precision="fp16"`
 gives ≈89 img/s, more than four upstream workers at `batch_size=1` (4 × 4 img/s).
 
+## Serving one MolScribe to other processes (e.g. RxnScribe)
+
+`molscribe/remote.py` (not imported by `molscribe` itself) exposes a loaded model:
+
+```python
+from molscribe.remote import make_router, register_celery_task
+app.include_router(make_router(model))                  # FastAPI: POST /molscribe/predict_batch
+register_celery_task(celery_app, lambda: model)         # Celery task 'molscribe.predict_batch'
+```
+
+Request: `{"images": [base64 PNG, ...], "batch_size": 32}`, answer: `{"predictions": [...]}` as from
+`predict_images`. `predict_images` holds a lock around the GPU work (CUDA graphs share buffers), so concurrent
+requests are safe; RDKit postprocessing runs outside the lock. The matching clients are in
+[rxnscribe-custom](https://github.com/mr-racer/rxnscribe-custom) (`rxnscribe.molscribe_client`), which can also run
+in the same process on top of this model (`rxnscribe.serving.attach`). Without RxnScribe nothing changes.
+
 ## The label dictionary
 
 Labels drawn on atoms (`OTBS`, `NHBoc`, `CO2Et`, `PPh3` …) are expanded by `molscribe/constants.py`:
@@ -138,6 +154,7 @@ To add entries: append `_extra([...], "...")` lines, then run
 
 ```
 molscribe/interface.py            MolScribe class, batching, precision, preprocessing threads
+molscribe/remote.py               HTTP router / Celery task to serve the model to other processes
 molscribe/inference/static_greedy.py   static-batch decoder + CUDA graph capture
 molscribe/transforms.py           OpenCV preprocessing (== albumentations pipeline, bitwise)
 molscribe/transformer/onmt_modules.py  the few OpenNMT modules the decoder uses (vendored, MIT)
