@@ -143,11 +143,12 @@ def make_draft(src, depicted, show_charge):
         m, x = (i, j) if is_metal(ai) else (j, i)
         if btype in DATIVE_TYPES:
             _readd(rw, m, x, Chem.BondType.SINGLE, 1)
-            donor = rw.GetAtomWithIdx(x)
-            if donor.GetFormalCharge() < 0:
-                donor.SetFormalCharge(donor.GetFormalCharge() + 1)
         elif i != m:
             _readd(rw, m, x, btype, draw)
+        # an anionic donor ([Cl-]->M, or the charge-separated covalent [N-][Mo+] of CSD SMILES) is drawn neutral
+        donor = rw.GetAtomWithIdx(x)
+        if donor.GetFormalCharge() < 0 and (btype in DATIVE_TYPES or btype == Chem.BondType.SINGLE):
+            donor.SetFormalCharge(donor.GetFormalCharge() + 1)
 
     metals = [a for a in rw.GetAtoms() if is_metal(a)]
     for a in rw.GetAtoms():
