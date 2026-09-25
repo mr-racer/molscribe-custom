@@ -14,9 +14,9 @@ from torch.optim import Adam, AdamW, SGD
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, RandomSampler, SequentialSampler
 from torch.utils.data.distributed import DistributedSampler
-from transformers import get_scheduler
 
 from molscribe.dataset import TrainDataset, AuxTrainDataset, bms_collate
+from molscribe.metal import metal_key
 from molscribe.model import Encoder, Decoder
 from molscribe.loss import Criterion
 from molscribe.utils import seed_torch, save_args, init_summary_writer, LossMeter, AverageMeter, asMinutes, timeSince, \
@@ -111,8 +111,63 @@ def get_args():
     parser.add_argument('--molblock', action='store_true')
     parser.add_argument('--compute_confidence', action='store_true')
     parser.add_argument('--keep_main_molecule', action='store_true')
+    # Organometallic fine-tuning
+    parser.add_argument('--aux_profile', type=str, default='default', choices=['default', 'metal'],
+                        help="augmentation profile of the aux data ('metal': +-5 deg skew, JPEG, binarisation ...)")
+    # MLflow
+    parser.add_argument('--mlflow_uri', type=str, default=None)
+    parser.add_argument('--mlflow_experiment', type=str, default=None, help='log to MLflow when set')
+    parser.add_argument('--mlflow_run_name', type=str, default=None)
     args = parser.parse_args()
     return args
+
+
+class Tracker:
+    """Thin MLflow wrapper: a no-op unless --mlflow_experiment is set, and only on the master rank."""
+
+    def __init__(self, args):
+        self.on = bool(args.mlflow_experiment) and args.local_rank in (0, -1)
+        if not self.on:
+            return
+        import mlflow
+        self.mlflow = mlflow
+        if args.mlflow_uri:
+            mlflow.set_tracking_uri(args.mlflow_uri)
+        mlflow.set_experiment(args.mlflow_experiment)
+        run = mlflow.start_run(run_name=args.mlflow_run_name or os.path.basename(os.path.normpath(args.save_path)))
+        self.run_id = run.info.run_id
+        mlflow.log_params({k: str(v)[:500] for k, v in vars(args).items() if k != 'device'})
+        commit = os.popen(f'git -C {os.path.dirname(os.path.abspath(__file__))} rev-parse --short HEAD').read().strip()
+        mlflow.set_tags({'git_commit': commit, 'save_path': os.path.abspath(args.save_path)})
+        with open(os.path.join(args.save_path, 'mlflow_run_id.txt'), 'w') as f:
+            f.write(self.run_id)
+
+    def metrics(self, values, step):
+        if self.on:
+            clean = {}
+            for k, v in values.items():
+                try:
+                    v = float(v)
+                except (TypeError, ValueError):
+                    continue
+                if np.isfinite(v):
+                    clean[k.replace('@', '_')] = v
+            self.mlflow.log_metrics(clean, step=int(step))
+
+    def artifact(self, path):
+        if self.on and os.path.exists(path):
+            self.mlflow.log_artifact(path)
+
+    def tag(self, key, value):
+        if self.on:
+            self.mlflow.set_tag(key, value)
+
+    def end(self):
+        if self.on:
+            self.mlflow.end_run()
+
+
+TRACKER = None
 
 
 def load_states(args, load_path):
@@ -159,6 +214,22 @@ def get_model(args, tokenizer, device, load_path=None):
         print_rank_0("DDP setup finished")
 
     return encoder, decoder
+
+
+def get_scheduler(name, optimizer, num_warmup_steps, num_training_steps):
+    """Same schedules as transformers.get_scheduler ('cosine' = linear warmup + half cosine, 'constant'), without the
+    transformers dependency; returns a LambdaLR, so checkpoint scheduler states are unchanged."""
+    import math
+    from torch.optim.lr_scheduler import LambdaLR
+    if name == 'constant':
+        return LambdaLR(optimizer, lambda step: 1.0)
+
+    def cosine(step):
+        if step < num_warmup_steps:
+            return float(step) / float(max(1, num_warmup_steps))
+        progress = float(step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
+    return LambdaLR(optimizer, cosine)
 
 
 def get_optimizer_and_scheduler(args, encoder, decoder, load_path=None):
@@ -245,6 +316,16 @@ def train_fn(train_loader, encoder, decoder, criterion, encoder_optimizer, decod
                 decoder_grad_norm=decoder_grad_norm,
                 encoder_lr=encoder_scheduler.get_lr()[0],
                 decoder_lr=decoder_scheduler.get_lr()[0]))
+            if TRACKER is not None:
+                TRACKER.metrics(dict({'train/loss': loss_meter.avg,
+                                      'train/encoder_lr': encoder_scheduler.get_lr()[0],
+                                      'train/decoder_lr': decoder_scheduler.get_lr()[0],
+                                      'train/grad_norm_encoder': encoder_grad_norm,
+                                      'train/grad_norm_decoder': decoder_grad_norm,
+                                      'train/data_time': data_time.avg,
+                                      'train/batch_time': batch_time.avg},
+                                     **{f'train/loss_{k}': v.avg for k, v in loss_meter.subs.items()}),
+                                step=global_step)
             loss_meter.reset()
         if args.train_steps_per_epoch != -1 and (
                 step + 1) // args.gradient_accumulation_steps == args.train_steps_per_epoch:
@@ -299,13 +380,26 @@ def valid_fn(valid_loader, encoder, decoder, tokenizer, device, args):
     return predictions
 
 
-def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
+def primary_score(scores):
+    """Checkpoint-selection score of one validation set: metal-aware exact match when the set has metal gold,
+    otherwise the usual SMILES exact match."""
+    if 'metal_em' in scores:
+        return scores['metal_em']
+    for name in ['post_smiles', 'graph_smiles', 'canon_smiles']:
+        if name in scores:
+            return scores[name]
+    return 0.0
+
+
+def train_loop(args, train_df, valid_dfs, aux_df, tokenizer, save_path):
+    global TRACKER
     SUMMARY = None
 
     if args.local_rank == 0 and not args.debug:
         os.makedirs(save_path, exist_ok=True)
         save_args(args)
         SUMMARY = init_summary_writer(save_path)
+        TRACKER = Tracker(args)
 
     print_rank_0("========== training ==========")
 
@@ -374,16 +468,27 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
             train_loader, encoder, decoder, criterion, encoder_optimizer, decoder_optimizer, epoch,
             encoder_scheduler, decoder_scheduler, scaler, device, global_step, SUMMARY, args)
 
-        # eval
-        scores = inference(args, valid_df, tokenizer, encoder, decoder, save_path, split='valid')
+        # eval: every validation set; the selection score is the mean of their primary scores
+        scores, primaries = {}, []
+        for valid_df in valid_dfs:
+            tag = os.path.splitext(os.path.basename(valid_df.attrs['file']))[0]
+            set_scores = inference(args, valid_df, tokenizer, encoder, decoder, save_path, split='valid')
+            if args.local_rank == 0:
+                scores.update({f'{tag}/{k}': v for k, v in set_scores.items()})
+                primaries.append(primary_score(set_scores))
 
         if args.local_rank != 0:
             continue
 
         elapsed = time.time() - start_time
+        score = float(np.mean(primaries))
+        scores['selection_score'] = score
 
         print_rank_0(f'Epoch {epoch + 1} - Time: {elapsed:.0f}s')
         print_rank_0(f'Epoch {epoch + 1} - Score: ' + json.dumps(scores))
+        if TRACKER is not None:
+            TRACKER.metrics(dict({f'valid/{k}': v for k, v in scores.items()}, epoch_time_s=elapsed,
+                                 train_epoch_loss=avg_loss), step=epoch + 1)
 
         save_obj = {
             'encoder': encoder.state_dict(),
@@ -395,11 +500,6 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
             'global_step': global_step,
             'args': {key: args.__dict__[key] for key in ['formats', 'input_size', 'coord_bins', 'sep_xy']}
         }
-
-        for name in ['post_smiles', 'graph_smiles', 'canon_smiles']:
-            if name in scores:
-                score = scores[name]
-                break
 
         if SUMMARY:
             SUMMARY.add_scalar('train/loss', avg_loss, global_step)
@@ -415,13 +515,18 @@ def train_loop(args, train_df, valid_df, aux_df, tokenizer, save_path):
             print_rank_0(f'Epoch {epoch + 1} - Save Best Score: {best_score:.4f} Model')
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_best.pth'))
             with open(os.path.join(save_path, 'best_valid.json'), 'w') as f:
-                json.dump(scores, f)
+                json.dump(dict(scores, epoch=epoch + 1), f)
+            if TRACKER is not None:
+                TRACKER.tag('best_epoch', str(epoch + 1))
 
         if args.save_mode == 'all':
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_ep{epoch}.pth'))
         if args.save_mode == 'last':
             torch.save(save_obj, os.path.join(save_path, f'{args.encoder}_{args.decoder}_last.pth'))
 
+    if TRACKER is not None:
+        TRACKER.artifact(os.path.join(save_path, 'best_valid.json'))
+        TRACKER.end()
     if args.local_rank != -1:
         dist.barrier()
 
@@ -511,8 +616,24 @@ def inference(args, data_df, tokenizer, encoder=None, decoder=None, save_path=No
         if 'post_SMILES' in pred_df:
             pred_df['post_SMILES'] = keep_main_molecule(pred_df['post_SMILES'])
 
+    # Metal-aware exact match against source-form gold (rendered organometallic sets carry a 'gold' column; their
+    # 'SMILES' column is the drawn-form label with [Ct]/[CO] tokens, which SMILES canonicalisation cannot compare)
+    if 'gold' in data_df.columns:
+        gold_strict = [metal_key(g) for g in data_df['gold']]
+        gold_ligand = [metal_key(g, ligands_only=True) for g in data_df['gold']]
+        for col, name in (('graph_SMILES', 'graph'), ('post_SMILES', 'post')):
+            if col in pred_df.columns:
+                strict = [metal_key(p) for p in pred_df[col]]
+                ligand = [metal_key(p, ligands_only=True) for p in pred_df[col]]
+                scores[f'metal_em_{name}'] = float(np.mean([g is not None and g == p for g, p in zip(gold_strict, strict)]))
+                scores[f'metal_em_ligand_{name}'] = float(np.mean([g is not None and g == p
+                                                                   for g, p in zip(gold_ligand, ligand)]))
+        if 'metal_em_graph' in scores:
+            scores['metal_em'] = scores['metal_em_graph']
+            scores['metal_em_ligand'] = scores['metal_em_ligand_graph']
+
     # Compute scores
-    if 'SMILES' in data_df.columns:
+    if 'SMILES' in data_df.columns and 'gold' not in data_df.columns:
         evaluator = SmilesEvaluator(data_df['SMILES'], tanimoto=True)
         print('label:', data_df['SMILES'].values[:2])
         if 'SMILES' in pred_df.columns:
@@ -555,9 +676,13 @@ def get_chemdraw_data(args):
             aux_df = pd.read_csv(os.path.join(args.data_path, args.aux_file))
             print_rank_0(f'aux.shape: {aux_df.shape}')
     if args.do_train or args.do_valid:
-        valid_df = pd.read_csv(os.path.join(args.data_path, args.valid_file))
-        valid_df.attrs['file'] = args.valid_file
-        print_rank_0(f'valid.shape: {valid_df.shape}')
+        # several validation sets may be given, comma-separated
+        valid_df = []
+        for file in args.valid_file.split(','):
+            df = pd.read_csv(os.path.join(args.data_path, file))
+            df.attrs['file'] = file
+            valid_df.append(df)
+            print_rank_0(f'{file} valid.shape: {df.shape}')
     if args.do_test:
         test_files = args.test_file.split(',')
         test_df = [pd.read_csv(os.path.join(args.data_path, file)) for file in test_files]
@@ -591,8 +716,9 @@ def main():
         train_loop(args, train_df, valid_df, aux_df, tokenizer, args.save_path)
 
     if args.do_valid:
-        scores = inference(args, valid_df, tokenizer, save_path=args.save_path, split='test')
-        print_rank_0(json.dumps(scores, indent=4))
+        for df in valid_df:
+            scores = inference(args, df, tokenizer, save_path=args.save_path, split='test')
+            print_rank_0(json.dumps(scores, indent=4))
 
     if args.do_test:
         assert type(test_df) is list

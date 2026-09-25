@@ -40,7 +40,11 @@ def init_logger(log_file='train.log'):
 
 
 def init_summary_writer(save_path):
-    from tensorboardX import SummaryWriter
+    """TensorBoard writer, or None when tensorboardX is not installed (training then logs to MLflow only)."""
+    try:
+        from tensorboardX import SummaryWriter
+    except ImportError:
+        return None
     summary = SummaryWriter(save_path)
     return summary
 

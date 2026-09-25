@@ -207,7 +207,49 @@ class SaltAndPepperNoise(A.DualTransform):
 
     def get_transform_init_args_names(self):
         return ('value', 'num_dots')
-    
+
+
+class _PixelOnly(A.DualTransform):
+    """Changes pixel values only; keypoints (atom positions) stay where they are."""
+
+    def apply_to_keypoint(self, keypoint, **params):
+        return keypoint
+
+
+class LineWidth(_PixelOnly):
+    """Thicker or thinner strokes (dark lines on white): erode = thicker, dilate = thinner."""
+
+    def apply(self, img, **params):
+        kernel = np.ones((2, 2), np.uint8)
+        return cv2.erode(img, kernel) if random.random() < 0.6 else cv2.dilate(img, kernel)
+
+    def get_transform_init_args_names(self):
+        return ()
+
+
+class Binarize(_PixelOnly):
+    """Hard threshold, as in scanned or badly exported figures."""
+
+    def apply(self, img, **params):
+        t = random.randint(140, 220)
+        return np.where(img < t, 0, 255).astype(img.dtype)
+
+    def get_transform_init_args_names(self):
+        return ()
+
+
+class BackgroundTint(_PixelOnly):
+    """Off-white paper background."""
+
+    def apply(self, img, **params):
+        tint = np.array([random.randint(215, 250) for _ in range(img.shape[2])], dtype=np.float32)
+        alpha = img.astype(np.float32) / 255.0
+        return (img.astype(np.float32) * (1 - alpha) + tint * alpha).astype(img.dtype)
+
+    def get_transform_init_args_names(self):
+        return ()
+
+
 class ResizePad(A.DualTransform):
 
     def __init__(self, height, width, interpolation=cv2.INTER_LINEAR, value=(255, 255, 255)):

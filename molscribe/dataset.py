@@ -16,7 +16,7 @@ from albumentations.pytorch import ToTensorV2
 from .indigo import Indigo
 from .indigo.renderer import IndigoRenderer
 
-from .augment import SafeRotate, CropWhite, PadWhite, SaltAndPepperNoise
+from .augment import SafeRotate, CropWhite, PadWhite, SaltAndPepperNoise, LineWidth, Binarize, BackgroundTint
 from .utils import FORMAT_INFO
 from .tokenizer import PAD_ID
 from .chemistry import get_num_atoms, normalize_nodes
@@ -33,21 +33,34 @@ INDIGO_DEARMOTIZE_PROB = 0.8
 INDIGO_COLOR_PROB = 0.2
 
 
-def get_transforms(input_size, augment=True, rotate=True, debug=False):
+def get_transforms(input_size, augment=True, rotate=True, debug=False, profile='default'):
+    """profile 'metal': rendered organometallic images already rotate their layout with upright text, so the image is
+    only skewed a little (+-5 deg, a scan) instead of +-90 deg, and paper/scan degradations are added."""
     trans_list = []
     if augment and rotate:
-        trans_list.append(SafeRotate(limit=90, border_mode=cv2.BORDER_CONSTANT, value=(255, 255, 255)))
+        limit = 5 if profile == 'metal' else 90
+        trans_list.append(SafeRotate(limit=limit, border_mode=cv2.BORDER_CONSTANT, value=(255, 255, 255)))
     trans_list.append(CropWhite(pad=5))
     if augment:
         trans_list += [
             # NormalizedGridDistortion(num_steps=10, distort_limit=0.3),
             A.CropAndPad(percent=[-0.01, 0.00], keep_size=False, p=0.5),
             PadWhite(pad_ratio=0.4, p=0.2),
+        ]
+        if profile == 'metal':
+            trans_list.append(LineWidth(p=0.2))
+        trans_list += [
             A.Downscale(scale_min=0.2, scale_max=0.5, interpolation=3),
             A.Blur(),
             A.GaussNoise(),
             SaltAndPepperNoise(num_dots=20, p=0.5)
         ]
+        if profile == 'metal':
+            trans_list += [
+                A.ImageCompression(quality_lower=30, quality_upper=90, p=0.3),
+                Binarize(p=0.1),
+                BackgroundTint(p=0.1),
+            ]
     trans_list.append(A.Resize(input_size, input_size))
     if not debug:
         mean = [0.485, 0.456, 0.406]
@@ -325,7 +338,7 @@ def generate_indigo_image(smiles, mol_augment=True, default_option=False, shuffl
 
 
 class TrainDataset(Dataset):
-    def __init__(self, args, df, tokenizer, split='train', dynamic_indigo=False):
+    def __init__(self, args, df, tokenizer, split='train', dynamic_indigo=False, profile='default'):
         super().__init__()
         self.df = df
         self.args = args
@@ -345,13 +358,17 @@ class TrainDataset(Dataset):
                     if field in df.columns:
                         self.labels[format_] = df[field].values
         self.transform = get_transforms(args.input_size,
-                                        augment=(self.labelled and args.augment))
+                                        augment=(self.labelled and args.augment), profile=profile)
         # self.fix_transform = A.Compose([A.Transpose(p=1), A.VerticalFlip(p=1)])
         self.dynamic_indigo = (dynamic_indigo and split == 'train')
         if self.labelled and not dynamic_indigo and args.coords_file is not None:
             if args.coords_file == 'aux_file':
                 self.coords_df = df
                 self.pseudo_coords = True
+            elif args.coords_file == 'aux_file_exact':
+                # node_coords are pixel positions normalised by the image size (rendered data), not molfile coords
+                self.coords_df = df
+                self.pseudo_coords = False
             else:
                 self.coords_df = pd.read_csv(args.coords_file)
                 self.pseudo_coords = False
@@ -531,7 +548,8 @@ class AuxTrainDataset(Dataset):
     def __init__(self, args, train_df, aux_df, tokenizer):
         super().__init__()
         self.train_dataset = TrainDataset(args, train_df, tokenizer, dynamic_indigo=args.dynamic_indigo)
-        self.aux_dataset = TrainDataset(args, aux_df, tokenizer, dynamic_indigo=False)
+        self.aux_dataset = TrainDataset(args, aux_df, tokenizer, dynamic_indigo=False,
+                                        profile=getattr(args, 'aux_profile', 'default'))
 
     def __len__(self):
         return len(self.train_dataset) + len(self.aux_dataset)
