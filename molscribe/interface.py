@@ -1,6 +1,7 @@
 import argparse
 import contextlib
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
 
@@ -73,6 +74,9 @@ class MolScribe:
         if preprocess_threads is None:
             preprocess_threads = min(8, os.cpu_count() or 1)
         self._pool = ThreadPoolExecutor(preprocess_threads) if preprocess_threads > 0 else None
+        # CUDA graphs and the decoder's static buffers are shared: one thread on the model at a time
+        # (the RDKit postprocessing runs outside the lock)
+        self._lock = threading.RLock()
 
     def _autocast(self):
         if self.device.type != 'cuda':
@@ -150,15 +154,17 @@ class MolScribe:
         self.decoder.compute_confidence = return_confidence
 
         batches = [input_images[idx:idx+batch_size] for idx in range(0, len(input_images), batch_size)]
-        pending = self._prepare(batches[0]) if batches else None
-        for b in range(len(batches)):
-            images = self._to_model_input(pending)
-            if b + 1 < len(batches):
-                pending = self._prepare(batches[b + 1])  # prepared by the thread pool while this batch runs
-            with torch.no_grad(), self._autocast():
-                features, hiddens = self.encoder(images)
-                batch_predictions = self.decoder.decode(features, hiddens)
-            predictions += batch_predictions
+        with self._lock:
+            self.decoder.compute_confidence = return_confidence
+            pending = self._prepare(batches[0]) if batches else None
+            for b in range(len(batches)):
+                images = self._to_model_input(pending)
+                if b + 1 < len(batches):
+                    pending = self._prepare(batches[b + 1])  # prepared by the thread pool while this batch runs
+                with torch.no_grad(), self._autocast():
+                    features, hiddens = self.encoder(images)
+                    batch_predictions = self.decoder.decode(features, hiddens)
+                predictions += batch_predictions
 
         smiles = [pred['chartok_coords']['smiles'] for pred in predictions]
         node_coords = [pred['chartok_coords']['coords'] for pred in predictions]
