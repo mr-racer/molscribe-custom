@@ -9,8 +9,9 @@ coordination is missing. It is rebuilt only where it is unambiguous:
 The metal's positive charge must be used up exactly. Anything else (dba, cod, arenes, bare metals, several
 separate metal ions) is dropped with a reason.
 
-usage (in an env with psycopg2, e.g. conda rxn_etl):
-  python -m metal_ocsr.catalysts --env /mnt/hard1/rxn_etl/.env --out data/raw/db_catalysts
+usage:
+  python -m metal_ocsr.catalysts --env /mnt/hard1/rxn_etl/.env --out data/raw/db_catalysts        (live DB)
+  python -m metal_ocsr.catalysts --from_csv scratch/catalyst_metal_classes.csv --out data/raw/db_catalysts
 """
 import argparse
 import collections
@@ -153,12 +154,18 @@ def export(env_path):
 
 
 def main():
+    import pandas as pd
     ap = argparse.ArgumentParser()
-    ap.add_argument('--env', required=True, help='.env with POSTGRES_* of the rxn_etl database')
+    src = ap.add_mutually_exclusive_group(required=True)
+    src.add_argument('--env', help='.env with POSTGRES_* of the rxn_etl database (read-only export)')
+    src.add_argument('--from_csv', help='an earlier export with columns smiles and n / n_rows')
     ap.add_argument('--out', required=True)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
-    df = export(args.env)
+    if args.env:
+        df = export(args.env)
+    else:
+        df = pd.read_csv(args.from_csv).rename(columns={'n': 'n_rows'})[['smiles', 'n_rows']]
     df.to_csv(os.path.join(args.out, 'reaction_catalyst_smiles.csv'), index=False)
     reasons = collections.Counter()
     out = []
@@ -171,7 +178,6 @@ def main():
             reasons['ok'] += 1
         except Drop as e:
             reasons[str(e)] += 1
-    import pandas as pd
     pd.DataFrame(out).to_csv(os.path.join(args.out, 'catalysts_reconnected.csv'), index=False)
     print(dict(reasons))
 
