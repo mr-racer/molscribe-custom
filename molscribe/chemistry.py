@@ -14,6 +14,7 @@ from SmilesPE.pretokenizer import atomwise_tokenizer
 
 from .constants import RGROUP_SYMBOLS, ABBREVIATIONS, ABBREVIATIONS_BY_ATTACH, UPPERCASE_ABBREVIATIONS, VALENCES, \
     FORMULA_REGEX, METALS, LIGAND_SMILES, ORGANIC_SET, is_rgroup
+from .metal import expand_centroids, fix_cyclopentadienyl
 
 
 def is_valid_mol(s, format_='atomtok'):
@@ -683,9 +684,12 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
         # molblock is obtained before expanding func groups, otherwise the expanded group won't have coordinates.
         # TODO: make sure molblock has the abbreviation information
         pred_molblock = Chem.MolToMolBlock(mol)
+        # eta-bonded rings are drawn as a line to a centroid pseudo-atom; atom indices still match coords here
+        mol = expand_centroids(mol, coords)
         pred_smiles, mol = _expand_functional_group(mol, {}, debug)
         if any(atom.GetSymbol() in METALS for atom in mol.GetAtoms()):
             mol = _coordination_bonds_to_dative(mol)
+            mol = fix_cyclopentadienyl(mol)
             pred_smiles = Chem.MolToSmiles(mol)
         success = True
     except Exception as e:
