@@ -69,7 +69,13 @@ def main():
     ap.add_argument("path")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
-    from molscribe.constants import ABBREVIATIONS_BY_ATTACH, is_rgroup
+    # "existing" keys are the hand-written ones: evaluate constants.py with the generated block blanked, so that a
+    # re-run regenerates the whole block instead of treating the previous run's keys as pre-existing
+    src = open(CONSTANTS, encoding="utf-8").read()
+    base_src = src[:src.index(BEGIN) + len(BEGIN)] + src[src.index(END):]
+    namespace = {"__name__": "molscribe_constants_base"}
+    exec(compile(base_src, CONSTANTS, "exec"), namespace)
+    ABBREVIATIONS_BY_ATTACH, is_rgroup = namespace["ABBREVIATIONS_BY_ATTACH"], namespace["is_rgroup"]
 
     data = json.load(open(args.path, encoding="utf-8"))
     items = data["accepted"] if "accepted" in data else data["items"]
@@ -103,9 +109,9 @@ def main():
         for keys, smiles, n_attach, name in sorted(by_cat[cat], key=lambda t: t[0][0].lower()):
             comment = f"  # {name}" if name else ""
             extra = f", {n_attach}" if n_attach != 1 else ""
-            lines.append(f"    _extra({json.dumps(keys, ensure_ascii=False)}, {json.dumps(smiles)}{extra}),{comment}\n")
+            lines.append(f"    _extra({keys!r}, {smiles!r}{extra}),{comment}\n")
     lines.append(END)
-    block = "".join(lines).replace('["', "['").replace('"]', "']").replace('", "', "', '")
+    block = "".join(lines)
 
     src = open(CONSTANTS, encoding="utf-8").read()
     start, end = src.index(BEGIN), src.index(END) + len(END)
