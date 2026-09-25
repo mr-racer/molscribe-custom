@@ -19,7 +19,7 @@ $TORCHRUN --nproc_per_node=1 --master_port=$(shuf -n 1 -i 20000-40000) train.py 
   --encoder_lr 5e-5 --decoder_lr 1e-4 --warmup_ratio 0.05 --scheduler cosine \
   --label_smoothing 0.1 --epochs ${EPOCHS:-12} \
   --batch_size ${BATCH:-64} --gradient_accumulation_steps ${ACCUM:-2} \
-  --use_checkpoint --fp16 --backend nccl --num_workers 24 \
+  ${CKPT_FLAG---use_checkpoint} --fp16 --backend nccl --num_workers 24 \
   --save_path $ROOT/runs/$RUN --save_mode all --print_freq 100 \
   --mlflow_experiment molscribe-metal-ocsr --mlflow_run_name $RUN \
   --do_train 2>&1 | tee $ROOT/runs/$RUN/train.log

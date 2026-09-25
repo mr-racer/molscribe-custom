@@ -25,7 +25,7 @@ $TORCHRUN --nproc_per_node=1 --master_port=$(shuf -n 1 -i 20000-40000) train.py 
   --load_path $BASE_CKPT \
   --encoder_lr 5e-5 --decoder_lr 1e-4 --warmup_ratio 0.05 --label_smoothing 0.1 \
   --epochs 1 --train_steps_per_epoch 20 --batch_size ${BATCH:-8} \
-  --use_checkpoint --fp16 --backend nccl --num_workers 4 \
+  ${CKPT_FLAG---use_checkpoint} --fp16 --backend nccl --num_workers 4 \
   --save_path $ROOT/runs/smoke --save_mode last --print_freq 5 \
   --mlflow_experiment molscribe-metal-ocsr-smoke --mlflow_run_name smoke \
   --do_train 2>&1 | tee $ROOT/runs/smoke/train.log
