@@ -1,0 +1,7 @@
+image,expected,source
+01_arene_FeCp_cation.png,C[c]12->[Fe+2]3456789%10(<-[cH]%11[cH]->3[cH]->4[cH-]->5[cH]->6%11)<-[c]1(C)[c]->7(C)[c]->8(C)[c]->9(C)[c]->%102C,0215_publication_metal_05_src07_arene_Fe_cation_47.png
+02_PdCl2_ferrocenyl_imine.png,CC(CO)/[N](=C/[c]12->[Fe+2]3456789(<-[cH]%10[cH]->3[cH]->4[cH-]->5[cH]->6%10)<-[cH]([cH]->7[cH-]->81)[cH]->92)->[Pd+2](<-[Cl-])(<-[Cl-])<-[N](=C\[c]12->[Fe+2]3456789(<-[cH]%10[cH]->3[cH]->4[cH-]->5[cH]->6%10)<-[cH]([cH]->7[cH-]->81)[cH]->92)/C(C)CO,0231_publication_metal_21_src31_ferrocene_PdCl2_complex.png
+03_Pt_dtbpy_alkynyl.png,CC(C)(C)c1cc[n]2->[Pt+2](<-[C-]#Cc3ccccc3)(<-[C-]#Cc3ccccc3)<-[n]3ccc(C(C)(C)C)cc3-c2c1,0226_publication_metal_16_src25_Pt_dtbpy_alkynyl.png
+04_Co_NCMe.png,CC#[N]->[Co]123(<-[N]#CC)<-[N]4=CC=CC=C4C[N]->1(C)CC[N]->2(C)CC1=[N]->3C=CC=C1,10.1002_anie.202421157_12_figure_0_mol_1.jpg
+05_Ir_ppy2_dtbbpy.png,CC(C)(C)C1=CC=[N]2->[Ir]34([C]5=CC=CC=C5C5=CC=CC=[N]->35)([C]3=CC=CC=C3C3=[N]->4C=CC=C3)<-[N]3=CC=C(C(C)(C)C)C=C3C2=C1,10.1021_acscatal.5c02421_2_figure_1_mol_0.jpg
+06_PdCl2_macrocycle.png,[Cl][Pd]1([Cl])<-[N]2=C3C=CC=C2CCCCCCC2=CC=CC(=[N]->12)CCCCCC3,10.1002_anie.202417427_1_figure_0_mol_4.jpg
