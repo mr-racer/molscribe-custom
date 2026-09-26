@@ -188,8 +188,8 @@ def replace_rgroups(smiles):
             sym = tok[1:-1]
             if sym[:1] == "R" and sym[1:].isdigit():
                 tok = f"[{sym[1:]}*]"
-            elif Chem.AtomFromSmiles(tok) is None:
-                tok = "*"
+            elif sym.startswith("Ar") or Chem.AtomFromSmiles(tok) is None:
+                tok = "*"  # [Ar] is an aryl placeholder in figures, not argon
         out.append(tok)
     return "".join(out)
 
