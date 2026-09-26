@@ -672,6 +672,12 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
                 mol.AddBond(ids[i], ids[j], Chem.BondType.SINGLE)
                 mol.GetBondBetweenAtoms(ids[i], ids[j]).SetBondDir(Chem.BondDir.BEGINDASH)
 
+    # Metal-donor lines are plain single bonds in the predicted graph. Turn the over-valent ones (an aromatic n of a
+    # chelating pyridine, C=O->M ...) into dative bonds before anything sanitizes the molecule: otherwise the donor's
+    # ring cannot be kekulized and the whole prediction ends up '<invalid>'.
+    if any(mol.GetAtomWithIdx(i).GetSymbol() in METALS for i in range(n)):
+        mol = Chem.RWMol(_coordination_bonds_to_dative(mol))
+
     pred_smiles = '<invalid>'
 
     try:
@@ -683,7 +689,12 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
         mol = _verify_chirality(mol, coords, symbols, edges, debug)
         # molblock is obtained before expanding func groups, otherwise the expanded group won't have coordinates.
         # TODO: make sure molblock has the abbreviation information
-        pred_molblock = Chem.MolToMolBlock(mol)
+        try:
+            pred_molblock = Chem.MolToMolBlock(mol)
+        except Exception:
+            # an eta-Cp ring is a neutral aromatic c1cccc1 until fix_cyclopentadienyl runs below and cannot be
+            # kekulized yet; the molblock is secondary output and must not make the prediction invalid
+            pred_molblock = Chem.MolToMolBlock(mol, kekulize=False)
         # eta-bonded rings are drawn as a line to a centroid pseudo-atom; atom indices still match coords here
         mol = expand_centroids(mol, coords)
         pred_smiles, mol = _expand_functional_group(mol, {}, debug)

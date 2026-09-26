@@ -104,7 +104,39 @@ class CentroidTest(unittest.TestCase):
         self.assertEqual(sum(a.GetTotalNumHs() for a in ring_c), 5, Chem.MolToSmiles(m))
 
 
+def decoder_graph(symbols, bonds, coords=None):
+    n = len(symbols)
+    edges = [[0] * n for _ in range(n)]
+    for i, j, t in bonds:
+        edges[i][j] = edges[j][i] = t
+    return coords or [(0.1 * i, 0.1 * (i % 3)) for i in range(n)], symbols, edges
+
+
 class GraphToSmilesTest(unittest.TestCase):
+
+    def test_aromatic_chelating_pyridines(self):
+        """The fine-tuned model predicts aromatic ring edges (type 4) for a metal-bound pyridine; the n then has
+        three bonds and could not be kekulized before the M-N bond became dative -> every such complex was invalid."""
+        from molscribe.chemistry import _convert_graph_to_smiles
+        # 2,2'-bipyridine PtCl2: ring A n0 c1 c2 c3 c4 c5, ring B n6 c7 c8 c9 c10 c11, c5-c11 link, Pt12, Cl13, Cl14
+        symbols = ['n', 'c', 'c', 'c', 'c', 'c', 'n', 'c', 'c', 'c', 'c', 'c', '[Pt]', 'Cl', 'Cl']
+        ring_a = [(0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 4, 4), (4, 5, 4), (5, 0, 4)]
+        ring_b = [(6, 7, 4), (7, 8, 4), (8, 9, 4), (9, 10, 4), (10, 11, 4), (11, 6, 4)]
+        bonds = ring_a + ring_b + [(5, 11, 1), (0, 12, 1), (6, 12, 1), (12, 13, 1), (12, 14, 1)]
+        smiles, _, ok = _convert_graph_to_smiles(*decoder_graph(symbols, bonds))
+        self.assertTrue(ok, smiles)
+        self.assertEqual(metal_key(smiles), metal_key('[Cl-]->[Pt+2]1(<-[Cl-])<-[n]2ccccc2-c2cccc[n]->12'), smiles)
+
+    def test_aromatic_cp_through_centroid(self):
+        """Circle-drawn Cp: aromatic neutral c1cccc1 + Ct; the molblock step used to kekulize it and fail."""
+        from molscribe.chemistry import _convert_graph_to_smiles
+        symbols = ['c', 'c', 'c', 'c', 'c', '[Ct]', '[Fe]', 'Cl']
+        bonds = [(0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 4, 4), (4, 0, 4), (5, 6, 1), (6, 7, 1)]
+        coords = [(0.50, 0.10), (0.62, 0.18), (0.58, 0.30), (0.42, 0.30), (0.38, 0.18),
+                  (0.50, 0.22), (0.50, 0.60), (0.80, 0.60)]
+        smiles, _, ok = _convert_graph_to_smiles(*decoder_graph(symbols, bonds, coords))
+        self.assertTrue(ok, smiles)
+        self.assertIsNotNone(Chem.MolFromSmiles(smiles), smiles)
 
     def test_cp_iron_dicarbonyl_chloride_from_decoder_graph(self):
         from molscribe.chemistry import _convert_graph_to_smiles
