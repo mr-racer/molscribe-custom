@@ -71,9 +71,9 @@ class SequenceLoss(nn.Module):
 
 class GraphLoss(nn.Module):
 
-    def __init__(self):
+    def __init__(self, n_classes=7):
         super(GraphLoss, self).__init__()
-        weight = torch.ones(7) * 10
+        weight = torch.ones(n_classes) * 10
         weight[0] = 1
         self.criterion = nn.CrossEntropyLoss(weight, ignore_index=-100)
 
@@ -101,7 +101,7 @@ class Criterion(nn.Module):
         criterion = {}
         for format_ in args.formats:
             if format_ == 'edges':
-                criterion['edges'] = GraphLoss()
+                criterion['edges'] = GraphLoss(getattr(args, 'edge_classes', 7))
             else:
                 if MASK in tokenizer[format_].stoi:
                     ignore_indices = [PAD_ID, MASK_ID]

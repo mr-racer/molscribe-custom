@@ -34,11 +34,29 @@ sys.path.insert(0, os.path.join(REPO, 'benchmark'))
 from evaluate import canon_general, canon_metal  # noqa: E402
 
 METAL_SETS = {'t1_lebedev_metal', 't2_mrbw_metal', 't4_synth_val'}
+_EXPANDED = {}
 
 
-def load_set(root, name):
+def expand_gold_labels(gold):
+    """Gold with its abbreviation labels expanded by the same dictionary the predictions go through ([CO], [Dipp],
+    [P-Ph2] ... in MRBW gold would otherwise become '*' and never match an expanded prediction)."""
+    if gold not in _EXPANDED:
+        from molscribe.chemistry import _postprocess_smiles
+        try:
+            s, _, ok = _postprocess_smiles(gold)
+        except Exception:
+            s, ok = gold, False
+        _EXPANDED[gold] = s if ok and s else gold
+    return _EXPANDED[gold]
+
+
+def load_set(root, name, synth_name='synth'):
+    if name == 'organic_val':
+        df = pd.read_csv(os.path.join(root, 'data', 'organic', 'val_uspto_1k.csv'))
+        return pd.DataFrame(dict(id=df.image_id, source='uspto', image=df.file_path, gold=df.SMILES, include=1,
+                                 tags='')), os.path.join(root, 'data')
     if name == 't4_synth_val':
-        df = pd.read_csv(os.path.join(root, 'data', 'synth', 'val_metal.csv'))
+        df = pd.read_csv(os.path.join(root, 'data', synth_name, 'val_metal.csv'))
         return pd.DataFrame(dict(id=df.image_id, source='synth', image=df.file_path, gold=df.gold, include=1,
                                  tags=np.where(df.has_eta, 'eta', ''), primary_metal=df.primary_metal)), \
             os.path.join(root, 'data')
@@ -63,8 +81,12 @@ def score_rows(df, preds, metal):
             g_b, p_b = canon_metal(r.gold, False), canon_metal(p, False)
             g_s, p_s = metal_key(r.gold), metal_key(p)
             g_l, p_l = metal_key(r.gold, ligands_only=True), metal_key(p, ligands_only=True)
+            gx = expand_gold_labels(r.gold)
+            g_sx, g_lx = metal_key(gx), metal_key(gx, ligands_only=True)
             res.update(em_bench=g_b is not None and g_b == p_b, em_strict=g_s is not None and g_s == p_s,
                        em_ligand=g_l is not None and g_l == p_l, valid=p_s is not None,
+                       em_strict_labels=g_sx is not None and g_sx == p_s,
+                       em_ligand_labels=g_lx is not None and g_lx == p_l,
                        clean='*' not in replace_rgroups(r.gold))
         else:
             res.update(em_stereo=canon_general(r.gold, True) is not None and canon_general(r.gold, True) == canon_general(p, True),
@@ -76,7 +98,7 @@ def score_rows(df, preds, metal):
 
 
 def summarize(det, metal):
-    keys = ['em_bench', 'em_strict', 'em_ligand', 'valid', 'rdkit_valid'] if metal else \
+    keys = ['em_bench', 'em_strict', 'em_ligand', 'em_strict_labels', 'em_ligand_labels', 'valid', 'rdkit_valid']         if metal else \
         ['em_stereo', 'em_nostereo', 'valid', 'rdkit_valid']
     groups = {'all': det}
     if metal:
@@ -122,7 +144,8 @@ def main():
     ap.add_argument('--root', required=True)
     ap.add_argument('--ckpt', required=True)
     ap.add_argument('--out', required=True)
-    ap.add_argument('--sets', default='t1_lebedev_metal,t2_mrbw_metal,t3_general,t4_synth_val')
+    ap.add_argument('--sets', default='t1_lebedev_metal,t2_mrbw_metal,t3_general,t4_synth_val,organic_val')
+    ap.add_argument('--synth_name', default='synth', help='data folder of the synthetic validation set (T4)')
     ap.add_argument('--device', default='cuda')
     ap.add_argument('--batch_size', type=int, default=32)
     ap.add_argument('--limit', type=int, default=0)
@@ -140,7 +163,7 @@ def main():
 
     report, artifacts = {}, []
     for name in args.sets.split(','):
-        df, base = load_set(args.root, name)
+        df, base = load_set(args.root, name, args.synth_name)
         df = df[df.include.astype(int) == 1].reset_index(drop=True)
         if args.limit:
             df = df.head(args.limit)

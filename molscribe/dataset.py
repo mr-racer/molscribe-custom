@@ -337,6 +337,17 @@ def generate_indigo_image(smiles, mol_augment=True, default_option=False, shuffl
     return img, smiles, graph, success
 
 
+def edges_from_list(edge_list, n):
+    """[u, v, t] triples -> n x n edge-type matrix. Wedge/hash (5/6) are directional: read from v they are 11 - t.
+    Every other type, including dative (7), is symmetric."""
+    edges = torch.zeros((n, n), dtype=torch.long)
+    for u, v, t in edge_list:
+        if u < n and v < n:
+            edges[u, v] = t
+            edges[v, u] = 11 - t if t in (5, 6) else t
+    return edges
+
+
 class TrainDataset(Dataset):
     def __init__(self, args, df, tokenizer, split='train', dynamic_indigo=False, profile='default'):
         super().__init__()
@@ -494,18 +505,7 @@ class TrainDataset(Dataset):
             ref['edges'] = torch.tensor(edges)[:len(indices), :len(indices)]
         else:
             if 'edges' in self.df.columns:
-                edge_list = eval(self.df.loc[idx, 'edges'])
-                n = len(indices)
-                edges = torch.zeros((n, n), dtype=torch.long)
-                for u, v, t in edge_list:
-                    if u < n and v < n:
-                        if t <= 4:
-                            edges[u, v] = t
-                            edges[v, u] = t
-                        else:
-                            edges[u, v] = t
-                            edges[v, u] = 11 - t
-                ref['edges'] = edges
+                ref['edges'] = edges_from_list(eval(self.df.loc[idx, 'edges']), len(indices))
             else:
                 ref['edges'] = torch.ones(len(indices), len(indices), dtype=torch.long) * (-100)
 
@@ -527,18 +527,7 @@ class TrainDataset(Dataset):
             ref['edges'] = torch.tensor(edges)[:len(indices), :len(indices)]
         else:
             if 'edges' in self.df.columns:
-                edge_list = eval(self.df.loc[idx, 'edges'])
-                n = len(indices)
-                edges = torch.zeros((n, n), dtype=torch.long)
-                for u, v, t in edge_list:
-                    if u < n and v < n:
-                        if t <= 4:
-                            edges[u, v] = t
-                            edges[v, u] = t
-                        else:
-                            edges[u, v] = t
-                            edges[v, u] = 11 - t
-                ref['edges'] = edges
+                ref['edges'] = edges_from_list(eval(self.df.loc[idx, 'edges']), len(indices))
             else:
                 ref['edges'] = torch.ones(len(indices), len(indices), dtype=torch.long) * (-100)
 

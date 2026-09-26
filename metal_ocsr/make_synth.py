@@ -37,12 +37,12 @@ def _alarm(signum, frame):
     raise TimeoutError()
 
 
-def _init(root, split, seed):
+def _init(root, split, seed, out_name='synth'):
     RDLogger.DisableLog('rdApp.*')
     import logging
     logging.getLogger('metal2d').setLevel(logging.ERROR)
     signal.signal(signal.SIGALRM, _alarm)
-    ARGS.update(root=root, split=split, seed=seed)
+    ARGS.update(root=root, split=split, seed=seed, out_name=out_name)
 
 
 def work(row):
@@ -51,7 +51,7 @@ def work(row):
     rows, reasons = [], Counter()
     split, data = ARGS['split'], os.path.join(ARGS['root'], 'data')
     shard = f'{int(row["pool_id"][1:]) // 1000:03d}'
-    rel_dir = os.path.join('synth', 'images', split, shard)
+    rel_dir = os.path.join(ARGS['out_name'], 'images', split, shard)
     os.makedirs(os.path.join(data, rel_dir), exist_ok=True)
     signal.alarm(TIMEOUT_S)
     try:
@@ -75,7 +75,7 @@ def work(row):
             cv2.imwrite(os.path.join(data, rel), s['image'])
             rows.append(dict(image_id=image_id, file_path=rel, SMILES=s['smiles'],
                              node_coords=json.dumps(s['node_coords']), edges=json.dumps(s['edges']),
-                             gold=row['canonical'], pool_id=row['pool_id'], source=row['source'],
+                             gold=s['gold'] or row['canonical'], pool_id=row['pool_id'], source=row['source'],
                              primary_metal=row['primary_metal'], has_eta=row['has_eta'], **s['meta']))
             reasons['ok'] += 1
     except TimeoutError:
@@ -121,6 +121,7 @@ def main():
     ap.add_argument('--workers', type=int, default=32)
     ap.add_argument('--limit', type=int, default=0, help='first N structures only (smoke runs)')
     ap.add_argument('--seed', type=int, default=20260925)
+    ap.add_argument('--out_name', default='synth', help='output folder under root/data (E1: synth, E2: synth_e2)')
     args = ap.parse_args()
     data = os.path.join(args.root, 'data')
     pool = pd.read_csv(os.path.join(data, 'pool', f'{args.split}.csv'))
@@ -130,7 +131,7 @@ def main():
     rows, reasons, secs = [], Counter(), []
     # apply_async + get(timeout) instead of imap: a native crash (segfault inside RDKit layout code) kills the worker
     # and loses its task; imap would then wait forever, here the task times out and the pool replaces the worker
-    with Pool(args.workers, initializer=_init, initargs=(args.root, args.split, args.seed), maxtasksperchild=500) as p:
+    with Pool(args.workers, initializer=_init, initargs=(args.root, args.split, args.seed, args.out_name), maxtasksperchild=500) as p:
         pending = [(rec, p.apply_async(work, (rec,))) for rec in pool.to_dict('records')]
         for i, (rec, res) in enumerate(pending):
             try:
@@ -143,17 +144,19 @@ def main():
             if (i + 1) % 5000 == 0:
                 print(f'{i + 1}/{len(pool)} structures, {len(rows)} images, {time.time() - t0:.0f}s', flush=True)
     df = pd.DataFrame(rows).sort_values('image_id').reset_index(drop=True)
-    out_csv = os.path.join(data, 'synth', f'{args.split}_metal.csv')
+    out_csv = os.path.join(data, args.out_name, f'{args.split}_metal.csv')
     df.to_csv(out_csv, index=False)
     manifest = dict(split=args.split, structures=len(pool), images=len(df), reasons=reasons,
                     seconds=round(time.time() - t0), per_structure_s=dict(mean=float(np.mean(secs)),
                                                                           p99=float(np.percentile(secs, 99))),
                     sources=Counter(df.source), metals=Counter(df.primary_metal).most_common(),
                     eta_images=int(df.n_eta.gt(0).sum()), standard_style=float(df.standard_style.mean()),
-                    coordgen=float(df.coordgen.mean()), mean_atoms=float(df.n_atoms.mean()))
-    with open(os.path.join(data, 'synth', f'{args.split}_manifest.json'), 'w') as f:
+                    coordgen=float(df.coordgen.mean()), mean_atoms=float(df.n_atoms.mean()),
+                    rgroup_images=float(df.n_rgroup.gt(0).mean()), dative_images=float(df.n_dative.gt(0).mean()),
+                    arrow_images=float(df.arrows.mean()))
+    with open(os.path.join(data, args.out_name, f'{args.split}_manifest.json'), 'w') as f:
         json.dump(manifest, f, indent=1, default=int)
-    qa_sheets(df, data, os.path.join(data, 'synth', 'qa'), args.split)
+    qa_sheets(df, data, os.path.join(data, args.out_name, 'qa'), args.split)
     print(json.dumps({k: manifest[k] for k in ('structures', 'images', 'reasons', 'seconds')}, default=int))
 
 

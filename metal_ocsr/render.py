@@ -49,8 +49,15 @@ def sample_params(rng):
              circles=bool(rng.random() < 0.3),
              show_charge=bool(rng.random() < 0.5),
              rate_organic=float(rng.uniform(0.0, 0.7)), p_ligand=0.5,
+             # 89 % of the structures have an R site, so p=0.34 gives ~30 % R-labelled images
+             rgroup=bool(rng.random() < 0.34),
+             arrows=bool(rng.random() < 0.1),
+             metal_label=str(rng.choice(['plain', 'oxidation', 'bracket'], p=[0.77, 0.15, 0.08])),
              context=dict(label=0.5, intrusion=0.4, brackets=0.15, frame=0.05))
     return p
+
+
+ROMAN = ['I', 'II', 'III', 'IV', 'V', 'VI']
 
 
 # --------------------------------------------------------------------------------------------------------------------
@@ -163,7 +170,8 @@ def wedges(src, draft, rng, p):
     if p['metal_legs']:
         legs = [b for b in draft.GetBonds() if b.GetBondType() == Chem.BondType.SINGLE
                 and is_metal(b.GetBeginAtom()) and not is_metal(b.GetEndAtom())
-                and b.GetEndAtom().GetProp('kind') != 'ct' and b.GetBondDir() == Chem.BondDir.NONE]
+                and b.GetEndAtom().GetProp('kind') != 'ct' and b.GetBondDir() == Chem.BondDir.NONE
+                and not b.HasProp('dative')]
         if len(legs) >= 3:
             for b in rng.choice(legs, size=min(len(legs), int(rng.integers(1, 3))), replace=False):
                 b.SetBondDir(Chem.BondDir.BEGINWEDGE if rng.random() < 0.5 else Chem.BondDir.BEGINDASH)
@@ -200,9 +208,21 @@ def circle_rings(mol):
 # --------------------------------------------------------------------------------------------------------------------
 #  drawing
 # --------------------------------------------------------------------------------------------------------------------
-def drawing_mol(final, circled):
-    """Copy for RDKit: Kekule bond orders, circled rings as single bonds, no aromatic flags."""
+def drawing_mol(final, circled, p=None, rng=None):
+    """Copy for RDKit: Kekule bond orders, circled rings as single bonds, no aromatic flags; optionally dative bonds
+    as arrows (donor -> metal) and metals written with an oxidation state (Co^III) or in brackets ([Fe])."""
     dm = Chem.RWMol(final)
+    if p and p.get('arrows'):
+        for b in [b for b in dm.GetBonds() if b.HasProp('dative')]:
+            i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+            metal, donor = (i, j) if is_metal(dm.GetAtomWithIdx(i)) else (j, i)
+            dm.RemoveBond(i, j)
+            dm.AddBond(donor, metal, Chem.BondType.DATIVE)
+    if p and p.get('metal_label', 'plain') != 'plain':
+        for a in dm.GetAtoms():
+            if is_metal(a) and a.GetFormalCharge() == 0 and not a.HasProp('atomLabel'):
+                a.SetProp('atomLabel', f'{a.GetSymbol()}<sup>{ROMAN[int(rng.integers(0, 4))]}</sup>'
+                          if p['metal_label'] == 'oxidation' else f'[{a.GetSymbol()}]')
     in_circle = {frozenset((i, j)) for r in circled for i in r for j in r}
     for b in dm.GetBonds():
         if b.GetIsAromatic() or b.GetBondType() == Chem.BondType.AROMATIC:
@@ -219,7 +239,7 @@ def drawing_mol(final, circled):
 
 
 def draw(final, circled, rng, p):
-    dm = drawing_mol(final, circled)
+    dm = drawing_mol(final, circled, p, rng)
     n = dm.GetNumAtoms()
     xy = _positions(dm)
     lengths = [np.linalg.norm(xy[b.GetBeginAtomIdx()] - xy[b.GetEndAtomIdx()]) for b in dm.GetBonds()]
@@ -262,6 +282,14 @@ def draw(final, circled, rng, p):
         radius = 0.58 * float(np.mean(np.linalg.norm(pts - centre, axis=1)))
         cv2.circle(img, (int(round(centre[0])), int(round(centre[1]))), int(round(radius)), (0, 0, 0), lw,
                    cv2.LINE_AA)
+    # R placeholders drawn as spheres (the MRBW-style ball)
+    for a in dm.GetAtoms():
+        if a.HasProp('ball'):
+            centre = (int(round(pix[a.GetIdx()][0])), int(round(pix[a.GetIdx()][1])))
+            radius = max(3, int(round(0.3 * p['bond_px'])))
+            shade = int(rng.integers(100, 210))
+            cv2.circle(img, centre, radius, (shade, shade, shade), -1, cv2.LINE_AA)
+            cv2.circle(img, centre, radius, (40, 40, 40), 1, cv2.LINE_AA)
     return _crop(img, pix)
 
 
@@ -300,6 +328,18 @@ def render(src, rng, depicted=None, p=None):
         depicted = depict(src, coordgen=p['coordgen'])
     draft, centroids = L.make_draft(src, depicted, p['show_charge'])
     chosen = L.choose_abbreviations(src, draft, centroids, rng, p['rate_organic'], p['p_ligand'])
+    replacements, additions = [], []
+    if p['rgroup']:
+        blocked = {i for _, _, r in centroids for i in r} | {i for _, _, atoms, _ in chosen for i in atoms}
+        blocked |= {a.GetIdx() for a in src.GetAtoms() if is_metal(a)}
+        replacements, additions = L.choose_rgroups(src, draft, blocked, rng)
+        if additions:
+            xy0 = _positions(depicted)
+            blen = float(np.median([np.linalg.norm(xy0[b.GetBeginAtomIdx()] - xy0[b.GetEndAtomIdx()])
+                                    for b in depicted.GetBonds()])) if depicted.GetNumBonds() else 1.5
+            L.add_rgroups(draft, additions, blen)
+    gold = L.gold_with_rgroups(src, replacements, additions) if replacements or additions else None
+    chosen = chosen + replacements
     geometry(draft, centroids, rng, p)
     wedges(src, draft, rng, p)
     deleted = set()
@@ -319,6 +359,8 @@ def render(src, rng, depicted=None, p=None):
     coords = pix[order] / np.array([W, H])
     if not ((coords >= 0) & (coords <= 1)).all():
         raise L.Skip('coords_outside')
-    meta = dict(n_atoms=final.GetNumAtoms(), n_eta=len(centroids), n_abbr=len(chosen),
+    meta = dict(n_atoms=final.GetNumAtoms(), n_eta=len(centroids), n_abbr=len(chosen) - len(replacements),
+                n_rgroup=len(replacements) + len(additions), arrows=p['arrows'], metal_label=p['metal_label'],
+                n_dative=sum(1 for e in edges if e[2] == 7),
                 standard_style=p['standard'], coordgen=p['coordgen'], circles=len(circle_rings(final)))
-    return dict(image=img, smiles=smiles, node_coords=np.round(coords, 5).tolist(), edges=edges, meta=meta)
+    return dict(image=img, smiles=smiles, node_coords=np.round(coords, 5).tolist(), edges=edges, meta=meta, gold=gold)

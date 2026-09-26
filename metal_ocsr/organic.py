@@ -55,10 +55,12 @@ def main():
     ap.add_argument('--root', required=True)
     ap.add_argument('--pubchem', required=True)
     ap.add_argument('--n', type=int, default=200000)
-    ap.add_argument('--uspto_zip', required=True)
+    ap.add_argument('--uspto_zip', default=None)
     ap.add_argument('--n_val', type=int, default=1000)
     ap.add_argument('--workers', type=int, default=32)
     ap.add_argument('--seed', type=int, default=20260925)
+    ap.add_argument('--out_name', default='train_organic.csv')
+    ap.add_argument('--skip_val', action='store_true')
     args = ap.parse_args()
     out = os.path.join(args.root, 'data', 'organic')
     os.makedirs(os.path.join(out, 'uspto_val'), exist_ok=True)
@@ -67,8 +69,10 @@ def main():
     with Pool(args.workers) as p:
         smiles = [s for s in p.map(keep, candidates, chunksize=512) if s]
     smiles = list(dict.fromkeys(smiles))[:args.n]
-    pd.DataFrame(dict(SMILES=smiles)).to_csv(os.path.join(out, 'train_organic.csv'), index=False)
+    pd.DataFrame(dict(SMILES=smiles)).to_csv(os.path.join(out, args.out_name), index=False)
     print('organic replay', len(smiles))
+    if args.skip_val:
+        return
 
     with zipfile.ZipFile(args.uspto_zip) as z:
         df = pd.read_csv(z.open('real/USPTO.csv'))

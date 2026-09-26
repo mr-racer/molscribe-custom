@@ -145,13 +145,18 @@ def make_draft(src, depicted, show_charge):
                 _readd(rw, i, j, Chem.BondType.SINGLE, 1)
             continue
         m, x = (i, j) if is_metal(ai) else (j, i)
+        donor = rw.GetAtomWithIdx(x)
         if btype in DATIVE_TYPES:
-            _readd(rw, m, x, Chem.BondType.SINGLE, 1)
+            nb = _readd(rw, m, x, Chem.BondType.SINGLE, 1)
+            # a neutral donor (pyridine n, PPh3, nitrile, C=O, water) keeps all its own bonds: its line to the metal
+            # is the dative edge class. An anionic donor ([Cl-], sigma-aryl [c-], CO, carbene) is neutralised below
+            # and its line is an ordinary single bond.
+            if donor.GetFormalCharge() >= 0:
+                nb.SetIntProp('dative', 1)
         elif i != m:
             _readd(rw, m, x, btype, draw)
         # an anionic donor ([Cl-]->M, the charge-separated covalent [N-][Mo+] or imido [N-2] of CSD SMILES) is drawn
         # neutral; its H count is frozen below, so clearing the charge changes nothing else
-        donor = rw.GetAtomWithIdx(x)
         if donor.GetFormalCharge() < 0:
             donor.SetFormalCharge(0)
 
@@ -269,15 +274,186 @@ def condense(draft, chosen):
         a.SetChiralTag(Chem.ChiralType.CHI_UNSPECIFIED)
         a.SetProp('kind', 'abbr')
         a.SetProp('token', tok)
-        a.SetProp('atomLabel', display)
+        a.SetProp('atomLabel', '' if display == 'ball' else display)
+        if display == 'ball':
+            a.SetBoolProp('ball', True)
         inside = set(atoms)
         for b in a.GetBonds():
             if b.GetOtherAtomIdx(anchor) not in inside:
                 b.SetBondType(Chem.BondType.SINGLE)
                 b.SetIsAromatic(False)
                 _set_draw(b, 1)
+                if b.HasProp('dative'):  # a label (PPh3, MeCN ...) is expanded as a dative ligand by post-processing
+                    b.ClearProp('dative')
         delete.extend(i for i in atoms if i != anchor)
     return delete
+
+
+# --------------------------------------------------------------------------------------------------------------------
+#  R groups (Markush-style labels, 30 % of the images)
+# --------------------------------------------------------------------------------------------------------------------
+# token (what the label says), display variants; 'ball' is drawn as a filled sphere, the MRBW-style placeholder
+R_TOKENS = [('R', ['R'], 0.28), ('R1', ['R<sub>1</sub>', 'R<sup>1</sup>', 'R1'], 0.15),
+            ('R2', ['R<sub>2</sub>', 'R<sup>2</sup>', 'R2'], 0.10), ('R3', ['R<sub>3</sub>', 'R<sup>3</sup>'], 0.04),
+            ("R'", ["R'"], 0.07), ('Ar', ['Ar'], 0.10), ('X', ['X'], 0.06), ('R', ['ball'], 0.20)]
+LIGAND_R_TOKENS = [('L', ['L'], 0.7), ('X', ['X'], 0.3)]
+
+
+def _pick(rng, table):
+    p = np.array([w for _, _, w in table], dtype=float)
+    tok, displays, _ = table[int(rng.choice(len(table), p=p / p.sum()))]
+    return tok, str(rng.choice(displays))
+
+
+def rgroup_sites(src, blocked):
+    """Substituents that can become an R label (acyclic group of <= 12 atoms hanging from a ring atom, away from the
+    metal and its donors) and aromatic C-H atoms away from the metal that can receive one."""
+    metals = {a.GetIdx() for a in src.GetAtoms() if is_metal(a)}
+    near_metal = {n.GetIdx() for m in metals for n in src.GetAtomWithIdx(m).GetNeighbors()} | metals
+    groups = []
+    for b in src.GetBonds():
+        if b.GetBondType() != Chem.BondType.SINGLE or b.IsInRing():
+            continue
+        for anchor, start in ((b.GetBeginAtomIdx(), b.GetEndAtomIdx()), (b.GetEndAtomIdx(), b.GetBeginAtomIdx())):
+            if not src.GetAtomWithIdx(anchor).IsInRing() or anchor in near_metal or start in near_metal:
+                continue
+            seen, todo, ok = {start}, [start], True
+            while todo and ok:
+                for n in src.GetAtomWithIdx(todo.pop()).GetNeighbors():
+                    j = n.GetIdx()
+                    if j == anchor or j in seen:
+                        continue
+                    if j in near_metal or j in blocked:
+                        ok = False
+                        break
+                    seen.add(j)
+                    todo.append(j)
+            if ok and len(seen) <= 12 and start not in blocked:
+                groups.append((start, tuple(seen)))
+    ring_ch = [a.GetIdx() for a in src.GetAtoms() if a.GetIsAromatic() and a.GetSymbol() == 'C'
+               and a.GetTotalNumHs() == 1 and a.GetIdx() not in near_metal and a.GetIdx() not in blocked]
+    return groups, ring_ch
+
+
+def monodentate_ligands(src, blocked):
+    """(donor, atoms) of whole ligands bound to one metal through one donor atom, not eta, <= 30 atoms."""
+    rw = Chem.RWMol(src)
+    donors = {}
+    for b in list(rw.GetBonds()):
+        i, j = b.GetBeginAtomIdx(), b.GetEndAtomIdx()
+        if is_metal(rw.GetAtomWithIdx(i)) != is_metal(rw.GetAtomWithIdx(j)):
+            x = j if is_metal(rw.GetAtomWithIdx(i)) else i
+            donors[x] = donors.get(x, 0) + 1
+            rw.RemoveBond(i, j)
+    out = []
+    for frag in Chem.GetMolFrags(rw, sanitizeFrags=False):
+        d = [x for x in frag if x in donors]
+        if len(d) == 1 and donors[d[0]] == 1 and len(frag) <= 30 and not set(frag) & blocked \
+                and not any(is_metal(src.GetAtomWithIdx(x)) for x in frag):
+            out.append((d[0], tuple(frag)))
+    return out
+
+
+def choose_rgroups(src, draft, blocked, rng):
+    """1-3 R labels: substituent -> R (label at the group's first atom), aromatic C-H -> C-R (new atom), and with
+    p=0.15 a whole monodentate ligand -> L / X at its donor. Returns (replacements, additions):
+    replacements like `chosen` for condense(); additions (ring atom, token, display) for add_rgroups()."""
+    groups, ring_ch = rgroup_sites(src, blocked)
+    ligands = monodentate_ligands(src, blocked)
+    k = int(rng.choice([1, 2, 3], p=[0.6, 0.3, 0.1]))
+    replacements, additions, used = [], [], set(blocked)
+    if ligands and rng.random() < 0.15:
+        donor, atoms = ligands[int(rng.integers(len(ligands)))]
+        tok, disp = _pick(rng, LIGAND_R_TOKENS)
+        replacements.append((tok, donor, atoms, disp))
+        used.update(atoms)
+        k -= 1
+    order = list(range(len(groups) + len(ring_ch)))
+    rng.shuffle(order)
+    for idx in order:
+        if k <= 0:
+            break
+        tok, disp = _pick(rng, R_TOKENS)
+        if idx < len(groups):
+            start, atoms = groups[idx]
+            if set(atoms) & used:
+                continue
+            replacements.append((tok, start, atoms, disp))
+            used.update(atoms)
+        else:
+            c = ring_ch[idx - len(groups)]
+            if c in used:
+                continue
+            additions.append((c, tok, disp))
+            used.add(c)
+        k -= 1
+    return replacements, additions
+
+
+def gold_with_rgroups(src, replacements, additions):
+    """Source-form SMILES of what an R-labelled picture shows: each replaced group / whole ligand becomes its R token
+    at the group's first atom, each addition an R token on the ring atom. Tokens are written as [R1], [R], [Ar], [L]
+    ... like MolScribe's own R-group output, so molscribe.metal.metal_key compares them the same way."""
+    rw = Chem.RWMol(src)
+    tokens, delete = {}, []
+    for tok, start, atoms, _ in replacements:
+        a = rw.GetAtomWithIdx(start)
+        iso = 600 + len(tokens)
+        tokens[iso] = tok
+        a.SetAtomicNum(0)
+        a.SetIsotope(iso)
+        a.SetFormalCharge(0)
+        a.SetNoImplicit(True)
+        a.SetNumExplicitHs(0)
+        a.SetIsAromatic(False)
+        for b in a.GetBonds():
+            b.SetBondType(Chem.BondType.SINGLE)
+            b.SetIsAromatic(False)
+        delete.extend(i for i in atoms if i != start)
+    for c, tok, _ in additions:
+        atom = rw.GetAtomWithIdx(c)
+        atom.SetNoImplicit(True)
+        atom.SetNumExplicitHs(max(0, atom.GetTotalNumHs() - 1))
+        iso = 600 + len(tokens)
+        tokens[iso] = tok
+        dummy = Chem.Atom(0)
+        dummy.SetIsotope(iso)
+        r = rw.AddAtom(dummy)
+        rw.AddBond(c, r, Chem.BondType.SINGLE)
+    for i in sorted(set(delete), reverse=True):
+        rw.RemoveAtom(i)
+    m = rw.GetMol()
+    m.UpdatePropertyCache(strict=False)
+    smiles = Chem.MolToSmiles(m)
+    return re.sub(r'\[(\d+)\*\]', lambda g: f'[{tokens[int(g.group(1))]}]' if int(g.group(1)) in tokens
+                  else g.group(0), smiles)
+
+
+def add_rgroups(draft, additions, bond_len):
+    """New labelled pseudo-atoms bonded to aromatic C-H atoms, placed one bond length outwards from the ring."""
+    conf = draft.GetConformer()
+    xy = conf.GetPositions()[:, :2]
+    for c, tok, disp in additions:
+        atom = draft.GetAtomWithIdx(c)
+        nbrs = [n.GetIdx() for n in atom.GetNeighbors()]
+        direction = xy[c] - xy[nbrs].mean(axis=0) if nbrs else np.array([1.0, 0.0])
+        norm = np.linalg.norm(direction)
+        direction = direction / norm if norm > 1e-6 else np.array([1.0, 0.0])
+        pos = xy[c] + direction * bond_len
+        dummy = Chem.Atom(0)
+        dummy.SetNoImplicit(True)
+        r = draft.AddAtom(dummy)
+        conf = draft.GetConformer()
+        conf.SetAtomPosition(r, Point3D(float(pos[0]), float(pos[1]), 0.0))
+        ra = draft.GetAtomWithIdx(r)
+        ra.SetIntProp('src', -1)
+        ra.SetProp('kind', 'abbr')
+        ra.SetProp('token', tok)
+        ra.SetProp('atomLabel', '' if disp == 'ball' else disp)
+        if disp == 'ball':
+            ra.SetBoolProp('ball', True)
+        _readd(draft, c, r, Chem.BondType.SINGLE, 1)
+        atom.SetNumExplicitHs(max(0, atom.GetNumExplicitHs() - 1))
 
 
 def delete_atoms(draft, atoms):
@@ -297,6 +473,8 @@ def edge_type(bond):
         return 5
     if d == Chem.BondDir.BEGINDASH:
         return 6
+    if bond.HasProp('dative'):
+        return 7
     if bond.GetIsAromatic() or bond.GetBondType() == Chem.BondType.AROMATIC:
         return 4
     return {Chem.BondType.SINGLE: 1, Chem.BondType.DOUBLE: 2, Chem.BondType.TRIPLE: 3}.get(bond.GetBondType(), 1)

@@ -1,4 +1,5 @@
 import copy
+import functools
 import re
 import traceback
 import numpy as np
@@ -623,7 +624,10 @@ def _coordination_bonds_to_dative(mol):
     return mol.GetMol()
 
 
-def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
+def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False, dative_edges=False):
+    """dative_edges: the model has the dative edge class (7). Its metal-donor bonds are then taken as predicted, and
+    the valence heuristic that turns over-valent single metal-donor bonds into dative ones is not applied (it would
+    also turn the covalent bond of an anionic pyrrole-type donor, e.g. a porphyrin N, into a dative one)."""
     mol = Chem.RWMol()
     n = len(symbols)
     ids = []
@@ -671,11 +675,20 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
             elif edges[i][j] == 6:
                 mol.AddBond(ids[i], ids[j], Chem.BondType.SINGLE)
                 mol.GetBondBetweenAtoms(ids[i], ids[j]).SetBondDir(Chem.BondDir.BEGINDASH)
+            elif edges[i][j] == 7:
+                # dative: from the donor to the metal; between two non-metals it can only be a plain bond
+                i_metal = mol.GetAtomWithIdx(ids[i]).GetSymbol() in METALS
+                j_metal = mol.GetAtomWithIdx(ids[j]).GetSymbol() in METALS
+                if i_metal != j_metal:
+                    donor, metal = (ids[j], ids[i]) if i_metal else (ids[i], ids[j])
+                    mol.AddBond(donor, metal, Chem.BondType.DATIVE)
+                else:
+                    mol.AddBond(ids[i], ids[j], Chem.BondType.SINGLE)
 
     # Metal-donor lines are plain single bonds in the predicted graph. Turn the over-valent ones (an aromatic n of a
     # chelating pyridine, C=O->M ...) into dative bonds before anything sanitizes the molecule: otherwise the donor's
     # ring cannot be kekulized and the whole prediction ends up '<invalid>'.
-    if any(mol.GetAtomWithIdx(i).GetSymbol() in METALS for i in range(n)):
+    if not dative_edges and any(mol.GetAtomWithIdx(i).GetSymbol() in METALS for i in range(n)):
         mol = Chem.RWMol(_coordination_bonds_to_dative(mol))
 
     pred_smiles = '<invalid>'
@@ -699,7 +712,8 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
         mol = expand_centroids(mol, coords)
         pred_smiles, mol = _expand_functional_group(mol, {}, debug)
         if any(atom.GetSymbol() in METALS for atom in mol.GetAtoms()):
-            mol = _coordination_bonds_to_dative(mol)
+            if not dative_edges:
+                mol = _coordination_bonds_to_dative(mol)
             mol = fix_cyclopentadienyl(mol)
             pred_smiles = Chem.MolToSmiles(mol)
         success = True
@@ -714,18 +728,19 @@ def _convert_graph_to_smiles(coords, symbols, edges, image=None, debug=False):
     return pred_smiles, pred_molblock, success
 
 
-def convert_graph_to_smiles(coords, symbols, edges, images=None, num_workers=16):
+def convert_graph_to_smiles(coords, symbols, edges, images=None, num_workers=16, dative_edges=False):
+    convert = functools.partial(_convert_graph_to_smiles, dative_edges=dative_edges)
     if images is None:
         args_zip = zip(coords, symbols, edges)
     else:
         args_zip = zip(coords, symbols, edges, images)
 
     if num_workers <= 1:
-        results = itertools.starmap(_convert_graph_to_smiles, args_zip)
+        results = itertools.starmap(convert, args_zip)
         results = list(results)
     else:
         with multiprocessing.Pool(num_workers) as p:
-            results = p.starmap(_convert_graph_to_smiles, args_zip, chunksize=128)
+            results = p.starmap(convert, args_zip, chunksize=128)
 
     smiles_list, molblock_list, success = zip(*results)
     r_success = np.mean(success)

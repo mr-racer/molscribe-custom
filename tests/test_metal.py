@@ -161,5 +161,64 @@ class GraphToSmilesTest(unittest.TestCase):
         self.assertEqual(metal_key(smiles), metal_key(gold), f'\n{smiles}\n{gold}')
 
 
+class DativeClassTest(unittest.TestCase):
+
+    def test_padded_edge_head_predicts_like_the_original(self):
+        import torch
+        from molscribe.model import GraphPredictor, adapt_edge_head, edge_classes_of
+        torch.manual_seed(0)
+        old = GraphPredictor(16, n_classes=7)
+        states = {f'edges.{k}': v for k, v in old.state_dict().items()}
+        padded = adapt_edge_head(states, 8)
+        self.assertEqual(edge_classes_of(padded), 8)
+        new = GraphPredictor(16, n_classes=8)
+        new.load_state_dict({k[len('edges.'):]: v for k, v in padded.items()})
+        hidden = torch.randn(2, 5, 16)
+        a, b = old(hidden)['edges'].argmax(1), new(hidden)['edges'].argmax(1)
+        self.assertTrue(torch.equal(a, b))
+        self.assertFalse((b == 7).any())
+
+    def test_edge_list_dative_symmetric_wedge_directional(self):
+        from molscribe.dataset import edges_from_list
+        e = edges_from_list([[0, 1, 7], [1, 2, 5], [2, 3, 4]], 4)
+        self.assertEqual((e[0, 1].item(), e[1, 0].item()), (7, 7))
+        self.assertEqual((e[1, 2].item(), e[2, 1].item()), (5, 6))
+        self.assertEqual((e[2, 3].item(), e[3, 2].item()), (4, 4))
+
+    def test_edge_probabilities_symmetrised_for_dative(self):
+        import numpy as np
+        from molscribe.model import get_edge_prediction
+        prob = np.zeros((2, 2, 8))
+        prob[0, 1, 7] = 0.9
+        prob[0, 1, 0] = 0.1
+        prob[1, 0, 7] = 0.8
+        prob[1, 0, 1] = 0.2
+        prob[0, 0, 0] = prob[1, 1, 0] = 1
+        pred, _ = get_edge_prediction(prob)
+        self.assertEqual((pred[0][1], pred[1][0]), (7, 7))
+
+    def test_dative_edges_build_chelate(self):
+        from molscribe.chemistry import _convert_graph_to_smiles
+        symbols = ['n', 'c', 'c', 'c', 'c', 'c', 'n', 'c', 'c', 'c', 'c', 'c', '[Pt]', 'Cl', 'Cl']
+        ring_a = [(0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 4, 4), (4, 5, 4), (5, 0, 4)]
+        ring_b = [(6, 7, 4), (7, 8, 4), (8, 9, 4), (9, 10, 4), (10, 11, 4), (11, 6, 4)]
+        bonds = ring_a + ring_b + [(5, 11, 1), (0, 12, 7), (6, 12, 7), (12, 13, 1), (12, 14, 1)]
+        smiles, _, ok = _convert_graph_to_smiles(*decoder_graph(symbols, bonds), dative_edges=True)
+        self.assertTrue(ok, smiles)
+        self.assertIn('->', smiles)
+        self.assertEqual(metal_key(smiles), metal_key('[Cl-]->[Pt+2]1(<-[Cl-])<-[n]2ccccc2-c2cccc[n]->12'), smiles)
+
+    def test_pyrrole_type_donor_stays_covalent(self):
+        """An anionic pyrrolide N bonded to the metal (label: single bond) must not be turned into a dative bond,
+        which would leave an aromatic 5-ring n without H that cannot be kekulized."""
+        from molscribe.chemistry import _convert_graph_to_smiles
+        symbols = ['n', 'c', 'c', 'c', 'c', '[Cu]', 'Cl']
+        bonds = [(0, 1, 4), (1, 2, 4), (2, 3, 4), (3, 4, 4), (4, 0, 4), (0, 5, 1), (5, 6, 1)]
+        smiles, _, ok = _convert_graph_to_smiles(*decoder_graph(symbols, bonds), dative_edges=True)
+        self.assertTrue(ok, smiles)
+        self.assertNotIn('->', smiles)
+        self.assertIsNotNone(Chem.MolFromSmiles(smiles), smiles)
+
+
 if __name__ == '__main__':
     unittest.main()

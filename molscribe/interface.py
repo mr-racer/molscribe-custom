@@ -10,7 +10,7 @@ import torch
 import numpy as np
 
 from .transforms import InferenceTransform
-from .model import Encoder, Decoder, TransformerDecoderAR
+from .model import Encoder, Decoder, TransformerDecoderAR, EDGE_CLASSES, edge_classes_of
 from .chemistry import convert_graph_to_smiles
 from .tokenizer import get_tokenizer
 
@@ -28,7 +28,7 @@ def _allow_tf32():
         torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = previous
 
 
-BOND_TYPES = ["", "single", "double", "triple", "aromatic", "solid wedge", "dashed wedge"]
+BOND_TYPES = ["", "single", "double", "triple", "aromatic", "solid wedge", "dashed wedge", "dative"]
 
 
 def safe_load(module, module_states):
@@ -55,6 +55,9 @@ class MolScribe:
         """
         model_states = torch.load(model_path, map_location=torch.device('cpu'), weights_only=False)
         args = self._get_args(model_states['args'])
+        # dative-aware checkpoints have an 8th edge class; read it from the weights, not from saved args
+        args.edge_classes = edge_classes_of(model_states['decoder'])
+        self.dative_edges = args.edge_classes > EDGE_CLASSES
         # checkpoints store use_checkpoint=True from training; activation checkpointing is pure overhead at inference
         args.use_checkpoint = False
         if device is None:
@@ -172,7 +175,7 @@ class MolScribe:
         edges = [pred['edges'] for pred in predictions]
 
         smiles_list, molblock_list, r_success = convert_graph_to_smiles(
-            node_coords, node_symbols, edges, images=input_images, num_workers=self.num_workers)
+            node_coords, node_symbols, edges, images=input_images, num_workers=self.num_workers, dative_edges=self.dative_edges)
 
         outputs = []
         for smiles, molblock, pred in zip(smiles_list, molblock_list, predictions):

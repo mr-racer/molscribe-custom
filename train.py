@@ -17,7 +17,7 @@ from torch.utils.data.distributed import DistributedSampler
 
 from molscribe.dataset import TrainDataset, AuxTrainDataset, bms_collate
 from molscribe.metal import metal_key
-from molscribe.model import Encoder, Decoder
+from molscribe.model import Encoder, Decoder, adapt_edge_head
 from molscribe.loss import Criterion
 from molscribe.utils import seed_torch, save_args, init_summary_writer, LossMeter, AverageMeter, asMinutes, timeSince, \
     print_rank_0, format_df
@@ -112,6 +112,11 @@ def get_args():
     parser.add_argument('--compute_confidence', action='store_true')
     parser.add_argument('--keep_main_molecule', action='store_true')
     # Organometallic fine-tuning
+    parser.add_argument('--organic_guard', type=float, default=None,
+                        help='select checkpoints by the metal validation score, minus 10x any shortfall of the '
+                             'organic validation score below this value (e.g. the base model score - 0.01)')
+    parser.add_argument('--edge_classes', type=int, default=7, choices=[7, 8],
+                        help='8 adds the dative class (metal-donor lines); a 7-class checkpoint is padded on load')
     parser.add_argument('--aux_profile', type=str, default='default', choices=['default', 'metal'],
                         help="augmentation profile of the aux data ('metal': +-5 deg skew, JPEG, binarisation ...)")
     # MLflow
@@ -203,7 +208,8 @@ def get_model(args, tokenizer, device, load_path=None):
     if load_path:
         states = load_states(args, load_path)
         safe_load(encoder, states['encoder'])
-        safe_load(decoder, states['decoder'])
+        # a 7-class checkpoint loaded into a dative-aware model gets its edge classifier padded
+        safe_load(decoder, adapt_edge_head(states['decoder'], args.edge_classes))
         # print_rank_0(f"Model loaded from {load_path}")
     encoder.to(device)
     decoder.to(device)
@@ -475,13 +481,20 @@ def train_loop(args, train_df, valid_dfs, aux_df, tokenizer, save_path):
             set_scores = inference(args, valid_df, tokenizer, encoder, decoder, save_path, split='valid')
             if args.local_rank == 0:
                 scores.update({f'{tag}/{k}': v for k, v in set_scores.items()})
-                primaries.append(primary_score(set_scores))
+                primaries.append((primary_score(set_scores), 'metal_em' in set_scores))
 
         if args.local_rank != 0:
             continue
 
         elapsed = time.time() - start_time
-        score = float(np.mean(primaries))
+        metal_p = [v for v, is_metal in primaries if is_metal]
+        organic_p = [v for v, is_metal in primaries if not is_metal]
+        if args.organic_guard is not None and metal_p and organic_p:
+            shortfall = max(0.0, args.organic_guard - float(np.mean(organic_p)))
+            score = float(np.mean(metal_p)) - 10 * shortfall
+            scores['organic_shortfall'] = shortfall
+        else:
+            score = float(np.mean([v for v, _ in primaries]))
         scores['selection_score'] = score
 
         print_rank_0(f'Epoch {epoch + 1} - Time: {elapsed:.0f}s')
@@ -498,7 +511,7 @@ def train_loop(args, train_df, valid_dfs, aux_df, tokenizer, save_path):
             'decoder_optimizer': decoder_optimizer.state_dict(),
             'decoder_scheduler': decoder_scheduler.state_dict(),
             'global_step': global_step,
-            'args': {key: args.__dict__[key] for key in ['formats', 'input_size', 'coord_bins', 'sep_xy']}
+            'args': {key: args.__dict__[key] for key in ['formats', 'input_size', 'coord_bins', 'sep_xy', 'edge_classes']}
         }
 
         if SUMMARY:
@@ -592,7 +605,7 @@ def inference(args, data_df, tokenizer, encoder=None, decoder=None, save_path=No
         if args.compute_confidence:
             pred_df['edges_scores'] = [preds['edges_scores'] for preds in predictions]
         smiles_list, molblock_list, r_success = convert_graph_to_smiles(
-            pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'])
+            pred_df['node_coords'], pred_df['node_symbols'], pred_df['edges'], dative_edges=args.edge_classes > 7)
 
         print(f'Graph to SMILES success ratio: {r_success:.4f}')
         pred_df['graph_SMILES'] = smiles_list

@@ -279,14 +279,47 @@ class TransformerDecoderAR(TransformerDecoderBase):
             _recursive_map(self.decoder.state["cache"])
 
 
+# Edge classes: 0 none, 1-3 single/double/triple, 4 aromatic, 5/6 wedge/hash (directional), and in metal-aware
+# models 7 dative: a line from a neutral donor (pyridine n, PPh3, C=O ...) to a metal. Without its own class that
+# line had to be labelled "single", which taught the model atoms with one bond too many, also in organic molecules.
+EDGE_CLASSES = 7
+DATIVE = 7
+
+
+def adapt_edge_head(decoder_states, n_classes):
+    """Pad the edge classifier of a checkpoint that has fewer classes (a 7-class MolScribe checkpoint loaded into an
+    8-class dative-aware model). The new class starts as a copy of 'single' with a much lower bias, so the adapted
+    model predicts exactly like the original one until training teaches it the new class."""
+    out = dict(decoder_states)
+    for key in list(out):
+        if not key.endswith('edges.mlp.2.weight'):
+            continue
+        bias_key = key[:-len('weight')] + 'bias'
+        weight, bias = out[key], out[bias_key]
+        extra = n_classes - weight.shape[0]
+        if extra <= 0:
+            continue
+        out[key] = torch.cat([weight, weight[1:2].repeat(extra, 1)], dim=0)
+        out[bias_key] = torch.cat([bias, bias[1:2].repeat(extra) - 5.0], dim=0)
+    return out
+
+
+def edge_classes_of(decoder_states):
+    """Number of edge classes of a checkpoint (7 for MolScribe checkpoints, 8 for dative-aware ones)."""
+    for key, value in decoder_states.items():
+        if key.endswith('edges.mlp.2.weight'):
+            return int(value.shape[0])
+    return EDGE_CLASSES
+
+
 class GraphPredictor(nn.Module):
 
-    def __init__(self, decoder_dim, coords=False):
+    def __init__(self, decoder_dim, coords=False, n_classes=EDGE_CLASSES):
         super(GraphPredictor, self).__init__()
         self.coords = coords
         self.mlp = nn.Sequential(
             nn.Linear(decoder_dim * 2, decoder_dim), nn.GELU(),
-            nn.Linear(decoder_dim, 7)
+            nn.Linear(decoder_dim, n_classes)
         )
         if coords:
             self.coords_mlp = nn.Sequential(
@@ -325,6 +358,8 @@ def get_edge_prediction(edge_prob):
     edge_prob[..., :5] = (prob[..., :5] + prob_t[..., :5]) / 2
     edge_prob[..., 5] = (prob[..., 5] + prob_t[..., 6]) / 2
     edge_prob[..., 6] = (prob[..., 6] + prob_t[..., 5]) / 2
+    if prob.shape[-1] > DATIVE:  # dative is symmetric in the matrix; its direction comes from which end is the metal
+        edge_prob[..., DATIVE:] = (prob[..., DATIVE:] + prob_t[..., DATIVE:]) / 2
     diag = np.arange(n)
     edge_prob[diag, diag] = prob[diag, diag]
     prediction = np.argmax(edge_prob, axis=2).tolist()
@@ -343,7 +378,8 @@ class Decoder(nn.Module):
         decoder = {}
         for format_ in args.formats:
             if format_ == 'edges':
-                decoder['edges'] = GraphPredictor(args.dec_hidden_size, coords=args.continuous_coords)
+                decoder['edges'] = GraphPredictor(args.dec_hidden_size, coords=args.continuous_coords,
+                                                  n_classes=getattr(args, 'edge_classes', EDGE_CLASSES))
             else:
                 decoder[format_] = TransformerDecoderAR(args, tokenizer[format_])
         self.decoder = nn.ModuleDict(decoder)
