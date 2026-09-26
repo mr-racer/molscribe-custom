@@ -215,8 +215,11 @@ def get_model(args, tokenizer, device, load_path=None):
     decoder.to(device)
 
     if args.local_rank != -1:
-        encoder = DDP(encoder, device_ids=[args.local_rank], output_device=args.local_rank)
-        decoder = DDP(decoder, device_ids=[args.local_rank], output_device=args.local_rank)
+        # on CPU (pipeline checks with CUDA_VISIBLE_DEVICES=) DDP takes no device ids
+        device_ids = [args.local_rank] if torch.cuda.is_available() else None
+        output_device = args.local_rank if torch.cuda.is_available() else None
+        encoder = DDP(encoder, device_ids=device_ids, output_device=output_device)
+        decoder = DDP(decoder, device_ids=device_ids, output_device=output_device)
         print_rank_0("DDP setup finished")
 
     return encoder, decoder
@@ -715,7 +718,8 @@ def main():
     args.local_rank = int(os.environ['LOCAL_RANK'])
     if args.local_rank != -1:
         dist.init_process_group(backend=args.backend, init_method='env://', timeout=datetime.timedelta(0, 14400))
-        torch.cuda.set_device(args.local_rank)
+        if torch.cuda.is_available():
+            torch.cuda.set_device(args.local_rank)
         torch.backends.cudnn.benchmark = True
 
     args.formats = args.formats.split(',')
