@@ -33,7 +33,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(REPO, 'benchmark'))
 from evaluate import canon_general, canon_metal  # noqa: E402
 
-METAL_SETS = {'t1_lebedev_metal', 't2_mrbw_metal', 't4_synth_val'}
+METAL_SETS = {'t1_lebedev_metal', 't2_mrbw_metal', 't4_synth_val', 't4e2_synth_val'}
 _EXPANDED = {}
 
 
@@ -55,8 +55,10 @@ def load_set(root, name, synth_name='synth'):
         df = pd.read_csv(os.path.join(root, 'data', 'organic', 'val_uspto_1k.csv'))
         return pd.DataFrame(dict(id=df.image_id, source='uspto', image=df.file_path, gold=df.SMILES, include=1,
                                  tags='')), os.path.join(root, 'data')
-    if name == 't4_synth_val':
-        df = pd.read_csv(os.path.join(root, 'data', synth_name, 'val_metal.csv'))
+    if name in ('t4_synth_val', 't4e2_synth_val'):
+        # t4: the E1 synthetic validation set (comparable across runs); t4e2: the E2 one (R labels, dative lines)
+        folder = 'synth_e2' if name == 't4e2_synth_val' else synth_name
+        df = pd.read_csv(os.path.join(root, 'data', folder, 'val_metal.csv'))
         return pd.DataFrame(dict(id=df.image_id, source='synth', image=df.file_path, gold=df.gold, include=1,
                                  tags=np.where(df.has_eta, 'eta', ''), primary_metal=df.primary_metal)), \
             os.path.join(root, 'data')
