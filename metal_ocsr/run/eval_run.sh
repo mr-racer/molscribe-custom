@@ -13,6 +13,7 @@ for ck in $(ls $RUN_DIR/*_ep*.pth | sort -V); do
   ep=$(( $(basename $ck .pth | sed 's/.*_ep//') + 1 ))
   out=$ROOT/eval/$RUN/epoch_$(printf %02d $ep)
   [ -f $out/metrics.json ] && { echo "skip epoch $ep"; continue; }
-  $PY -m metal_ocsr.eval_metal --root $ROOT --ckpt $ck --out $out --mlflow_run_id $RUN_ID --step $ep --batch_size 32 \n    --sets ${SETS:-t1_lebedev_metal,t2_mrbw_metal,t3_general,t4_synth_val,organic_val}
+  $PY -m metal_ocsr.eval_metal --root $ROOT --ckpt $ck --out $out --mlflow_run_id $RUN_ID --step $ep --batch_size 32 \
+    --sets ${SETS:-t1_lebedev_metal,t2_mrbw_metal,t3_general,t4_synth_val,organic_val}
 done
 echo "best epoch by validation: $(python3 -c "import json;print(json.load(open('$RUN_DIR/best_valid.json'))['epoch'])")"
