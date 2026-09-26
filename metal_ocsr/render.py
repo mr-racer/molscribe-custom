@@ -242,8 +242,9 @@ def draw(final, circled, rng, p):
     dm = drawing_mol(final, circled, p, rng)
     n = dm.GetNumAtoms()
     xy = _positions(dm)
-    lengths = [np.linalg.norm(xy[b.GetBeginAtomIdx()] - xy[b.GetEndAtomIdx()]) for b in dm.GetBonds()]
-    blen = float(np.median([x for x in lengths if x > 1e-3])) if lengths else 1.5
+    lengths = [x for x in (np.linalg.norm(xy[b.GetBeginAtomIdx()] - xy[b.GetEndAtomIdx()]) for b in dm.GetBonds())
+               if x > 1e-3]
+    blen = float(np.median(lengths)) if lengths else 1.5
     extent = (xy.max(axis=0) - xy.min(axis=0)) / blen * p['bond_px']
     margin = 3 * p['bond_px'] + 20
     W, H = int(extent[0] + 2 * margin), int(extent[1] + 2 * margin)
