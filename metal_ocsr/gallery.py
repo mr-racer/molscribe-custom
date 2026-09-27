@@ -7,7 +7,8 @@ usage:
 Predictions go through the current post-processing. When it still returns '<invalid>', the panel shows the raw graph
 the model predicted (its own atom positions, symbols and bond orders), so a panel always shows what the model produced.
 Rows are sorted into sheets by outcome: improved (base wrong -> fine-tuned right), both_correct, regressed, wrong;
-index.csv lists every row with both predictions and flags.
+index.csv lists every row with both predictions and flags. Gold abbreviation labels are expanded like the
+predictions (same rule as the em_*_labels metrics).
 """
 import argparse
 import os
@@ -169,6 +170,10 @@ def main():
         del model
         torch.cuda.empty_cache()
 
+    # gold abbreviations ([CO], [Dipp], [P-Ph2] ... in MRBW) expanded like the predictions: the em_*_labels metric
+    from .eval_metal import expand_gold_labels
+    gt['gold_raw'] = gt.gold
+    gt['gold'] = [expand_gold_labels(g) if g else g for g in gt.gold]
     gold_ok = [bool(g) for g in gt.gold]
     jobs = [(g, None, None) for g in gt.gold]
     for name in ('base', 'ft'):
@@ -179,7 +184,7 @@ def main():
 
     rows = []
     for i, r in gt.iterrows():
-        rec = dict(id=r.id, gold=r.gold, include=r.get('include', 1), tags=r.get('tags', ''))
+        rec = dict(id=r.id, gold=r.gold, gold_raw=r.gold_raw, include=r.get('include', 1), tags=r.get('tags', ''))
         for name in ('base', 'ft'):
             p = preds[name][i].get('smiles', '')
             rec[f'pred_{name}'] = p
