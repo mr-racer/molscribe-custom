@@ -6,7 +6,7 @@ usage:
 
 Predictions go through the current post-processing. When it still returns '<invalid>', the panel shows the raw graph
 the model predicted (its own atom positions, symbols and bond orders), so a panel always shows what the model produced.
-Rows are sorted into sheets by outcome: e1_correct, improved (base wrong -> fine-tuned right), regressed, wrong;
+Rows are sorted into sheets by outcome: improved (base wrong -> fine-tuned right), both_correct, regressed, wrong;
 index.csv lists every row with both predictions and flags.
 """
 import argparse
@@ -146,6 +146,7 @@ def main():
     ap.add_argument('--root', required=True)
     ap.add_argument('--set', required=True)
     ap.add_argument('--ckpt', required=True, help='fine-tuned checkpoint (relative to root or absolute)')
+    ap.add_argument('--name', default='fine-tuned', help='panel title of the fine-tuned model, e.g. E2')
     ap.add_argument('--base_ckpt', default='ckpts/base/swin_base_char_aux_1m680k.pth')
     ap.add_argument('--out', required=True)
     ap.add_argument('--rows_per_sheet', type=int, default=8)
@@ -187,7 +188,7 @@ def main():
         rec['group'] = ('no_gold' if not gold_ok[i] else
                         'improved' if rec['strict_ft'] and not rec['strict_base'] else
                         'regressed' if rec['strict_base'] and not rec['strict_ft'] else
-                        'e1_correct' if rec['strict_ft'] else 'wrong')
+                        'both_correct' if rec['strict_ft'] else 'wrong')
         rows.append(rec)
     index = pd.DataFrame(rows)
     index.to_csv(os.path.join(out, 'index.csv'), index=False)
@@ -201,11 +202,11 @@ def main():
             panel(gold_img[i][0] if gold_ok[i] else _blank('no gold (Markush / excluded)'), 'gold'),
             panel(base_img[i][0], 'base (E0)', rec['strict_base'] if gold_ok[i] else None,
                   f"{lig('base')} {base_img[i][1] if base_img[i][1] != 'smiles' else ''}"),
-            panel(ft_img[i][0], 'fine-tuned (E1)', rec['strict_ft'] if gold_ok[i] else None,
+            panel(ft_img[i][0], args.name, rec['strict_ft'] if gold_ok[i] else None,
                   f"{lig('ft')} {ft_img[i][1] if ft_img[i][1] != 'smiles' else ''}"),
         ])
 
-    for group in ['improved', 'e1_correct', 'regressed', 'wrong', 'no_gold']:
+    for group in ['improved', 'both_correct', 'regressed', 'wrong', 'no_gold']:
         idx = [i for i, r in enumerate(rows) if r['group'] == group]
         for s in range(0, len(idx), args.rows_per_sheet):
             sheet = np.vstack([row_image(i) for i in idx[s:s + args.rows_per_sheet]])
