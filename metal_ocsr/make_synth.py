@@ -33,8 +33,12 @@ TIMEOUT_S = 30
 ARGS = {}
 
 
+class RenderTimeout(BaseException):
+    """Not an Exception subclass: metal2d's own `except Exception` fallbacks must not swallow the time limit."""
+
+
 def _alarm(signum, frame):
-    raise TimeoutError()
+    raise RenderTimeout()
 
 
 def _init(root, split, seed, out_name='synth'):
@@ -78,7 +82,7 @@ def work(row):
                              gold=s['gold'] or row['canonical'], pool_id=row['pool_id'], source=row['source'],
                              primary_metal=row['primary_metal'], has_eta=row['has_eta'], **s['meta']))
             reasons['ok'] += 1
-    except TimeoutError:
+    except RenderTimeout:
         reasons['timeout'] += 1
     except L.Skip as e:
         reasons[str(e)] += int(row['renders'])

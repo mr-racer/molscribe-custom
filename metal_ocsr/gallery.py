@@ -29,8 +29,12 @@ PANEL = 300
 TMP = tempfile.mkdtemp(prefix='gallery_')
 
 
+class RenderTimeout(BaseException):
+    """Not an Exception subclass: metal2d's own `except Exception` fallbacks must not swallow the time limit."""
+
+
 def _alarm(signum, frame):
-    raise TimeoutError()
+    raise RenderTimeout()
 
 
 def _init():
@@ -95,13 +99,32 @@ def _draw_graph(atoms, bonds):
     return cv2.imdecode(np.frombuffer(d.GetDrawingText(), np.uint8), cv2.IMREAD_COLOR)
 
 
+def _draw_rdkit(smiles):
+    """Plain RDKit layout, for structures metal2d cannot lay out in time."""
+    mol = Chem.MolFromSmiles(smiles) or Chem.MolFromSmiles(smiles, sanitize=False)
+    if mol is None:
+        return None
+    mol.UpdatePropertyCache(strict=False)
+    d = rdMolDraw2D.MolDraw2DCairo(PANEL, PANEL)
+    d.drawOptions().prepareMolsBeforeDrawing = False
+    from rdkit.Chem import rdDepictor
+    rdDepictor.Compute2DCoords(mol)
+    d.DrawMolecule(mol)
+    d.FinishDrawing()
+    return cv2.imdecode(np.frombuffer(d.GetDrawingText(), np.uint8), cv2.IMREAD_COLOR)
+
+
 def render(job):
     """job = (smiles, atoms, bonds) -> (panel image, how it was drawn)."""
     smiles, atoms, bonds = job
     signal.alarm(30)
     try:
         if isinstance(smiles, str) and smiles and smiles != '<invalid>':
-            img = _draw_metal2d(replace_rgroups(smiles))
+            try:
+                img = _draw_metal2d(replace_rgroups(smiles))
+            except RenderTimeout:
+                signal.alarm(15)
+                img = _draw_rdkit(replace_rgroups(smiles))
             if img is not None:
                 return img, 'smiles'
         if atoms:
@@ -109,7 +132,7 @@ def render(job):
             if img is not None:
                 return img, 'raw graph (post-processing failed)'
         return _blank(f'cannot draw: {smiles}'), 'none'
-    except Exception as e:
+    except (Exception, RenderTimeout) as e:
         return _blank(f'{type(e).__name__}: {smiles}'), 'none'
     finally:
         signal.alarm(0)
