@@ -13,7 +13,7 @@ tables and the internals are in [docs/fork-details.md](docs/fork-details.md); th
 
 Reaction schemes (image → reactants / conditions / products) are a different model:
 [rxnscribe-custom](https://gitlab.odanchem.org/odanchem/rxnscribe-custom), which plugs into a MolScribe that is
-already running — see [Adding RxnScribe](#adding-rxnscribe) below.
+already running — see [Adding RxnScribe](#6-adding-rxnscribe) below.
 
 ---
 

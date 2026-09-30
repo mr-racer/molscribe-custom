@@ -130,7 +130,7 @@ register_celery_task(celery_app, lambda: model)         # Celery task 'molscribe
 Request: `{"images": [base64 PNG, ...], "batch_size": 32}`, answer: `{"predictions": [...]}` as from
 `predict_images`. `predict_images` holds a lock around the GPU work (CUDA graphs share buffers), so concurrent
 requests are safe; RDKit postprocessing runs outside the lock. The matching clients are in
-[rxnscribe-custom](https://github.com/mr-racer/rxnscribe-custom) (`rxnscribe.molscribe_client`), which can also run
+[rxnscribe-custom](https://gitlab.odanchem.org/odanchem/rxnscribe-custom) (`rxnscribe.molscribe_client`), which can also run
 in the same process on top of this model (`rxnscribe.serving.attach`). Without RxnScribe nothing changes.
 
 ## The label dictionary
