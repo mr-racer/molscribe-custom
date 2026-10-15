@@ -379,7 +379,19 @@ N_ALKYL_REGEX = re.compile(r'^(?:n-?)?C(\d+)H(\d+)$')
 
 def _lookup_abbreviation(symbol, n_attach=None):
     """SMILES of a known abbreviation (exact, all-caps variant, or linear alkyl CnH2n+1), else None.
-    With n_attach given, an entry for that bond count is preferred over the default (1-bond) entry."""
+    With n_attach given, an entry for that bond count is preferred over the default (1-bond) entry.
+    The decoder sometimes writes a capital I as a lowercase l ("OTlPS" for OTIPS): such a label is not in the table
+    and used to be parsed as a formula, Tl=P#S. If the l -> I spelling is a known abbreviation, that one is used;
+    the formula of the original label ("CH2Cl") is untouched."""
+    smiles = _lookup_abbreviation_exact(symbol, n_attach)
+    if smiles is None and 'l' in symbol:
+        fixed = symbol.replace('l', 'I')
+        if fixed in ABBREVIATIONS or fixed in UPPERCASE_ABBREVIATIONS:
+            smiles = _lookup_abbreviation_exact(fixed, n_attach)
+    return smiles
+
+
+def _lookup_abbreviation_exact(symbol, n_attach=None):
     if symbol.isupper() and symbol not in ABBREVIATIONS and symbol in UPPERCASE_ABBREVIATIONS:
         symbol = UPPERCASE_ABBREVIATIONS[symbol]
     if n_attach is not None and (symbol, n_attach) in ABBREVIATIONS_BY_ATTACH:

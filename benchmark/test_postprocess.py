@@ -55,6 +55,11 @@ CASES = [
     # hydrogen isotopes
     ("D", graph(["C", "[D]"], [(0, 1, 1)]), "[2H]C"),
     ("CD3", graph(["C", "[CD3]"], [(0, 1, 1)]), "[2H]C([2H])([2H])C"),
+    # the decoder writes a capital I as l: "OTlPS" is OTIPS, not Tl=P#S
+    ("phenyl-OTlPS", graph(["c"] * 6 + ["[OTlPS]"], [(i, (i + 1) % 6, 4) for i in range(6)] + [(0, 6, 1)]),
+     "CC(C)[Si](Oc1ccccc1)(C(C)C)C(C)C"),
+    ("C-TlPSO", graph(["C", "[TlPSO]"], [(0, 1, 1)]), "CC(C)[Si](OC)(C(C)C)C(C)C"),
+    ("CH2Cl keeps chlorine", graph(["C", "[CH2Cl]"], [(0, 1, 1)]), "CCCl"),
     # previously fixed behaviour must stay
     ("NMe in ring", graph(["C"] * 5 + ["[NMe]"], [(i, (i + 1) % 6, 1) for i in range(6)]), "CN1CCCCC1"),
     ("SO2NH2 not nitro", graph(["c"] * 6 + ["[SO2NH2]"], [(i, (i + 1) % 6, 4) for i in range(6)] + [(0, 6, 1)]),
